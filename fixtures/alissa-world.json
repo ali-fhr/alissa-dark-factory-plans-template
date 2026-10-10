@@ -1,0 +1,56 @@
+{
+  "about": "The Alissa state the fixture plans are linted against by the tests' fake API (rules 10-12), and under `github` the repositories the fake GitHub API serves (rule 5b): each one's default branch and the paths that exist there. Ids are fixture ids, not real ones.",
+  "projects": {
+    "p0000000000000000000000000000001": {
+      "title": "Example program",
+      "status": "active",
+      "milestones": [
+        {
+          "_id": "q0000000000000000000000000000001",
+          "bodyOfWorkId": "b0000000000000000000000000000001",
+          "title": "M1 — the services follow the config contract",
+          "status": "in_progress",
+          "validationCriteria": [
+            { "id": "c1", "description": "Every service reads the 2.x keys.", "satisfied": false, "type": "manual" },
+            { "id": "c2", "description": "The contract is documented.", "satisfied": true, "type": "manual" }
+          ]
+        },
+        {
+          "_id": "q0000000000000000000000000000002",
+          "bodyOfWorkId": "b0000000000000000000000000000002",
+          "title": "M0 — done and closed",
+          "status": "completed",
+          "validationCriteria": []
+        },
+        {
+          "_id": "q0000000000000000000000000000003",
+          "bodyOfWorkId": "b0000000000000000000000000000003",
+          "title": "Exhaust — the program's follow-ups",
+          "status": "upcoming",
+          "validationCriteria": []
+        }
+      ]
+    },
+    "p0000000000000000000000000000002": { "title": "A paused program", "status": "paused", "milestones": [] }
+  },
+  "objectives": {
+    "o0000000000000000000000000000001": { "status": "active" },
+    "o0000000000000000000000000000002": { "status": "succeeded" }
+  },
+  "tasks": {
+    "TASK-100": "validated",
+    "TASK-101": "in_progress",
+    "TASK-102": "pending_validation"
+  },
+  "feeds": ["example-org/service-a", "example-org/service-b"],
+  "steering": [
+    { "scope": { "kind": "fleet" }, "offLimits": ["convex/schema.ts", "topic:pricing"] },
+    { "scope": { "kind": "program", "projectId": "p0000000000000000000000000000001" }, "offLimits": ["infra/secrets/**"] },
+    { "scope": { "kind": "program", "projectId": "p0000000000000000000000000000002" }, "offLimits": ["src/config/**"] }
+  ],
+  "github": {
+    "example-org/service-a": { "defaultBranch": "main", "paths": ["README.md", "docs/config/contract.md", "docs/config/extra-1.md", "docs/config/extra-2.md", "docs/config/extra-3.md", "docs/config/extra-4.md", "docs/config/extra-5.md", "docs/config/extra-6.md", "docs/config/extra-7.md"] },
+    "example-org/service-b": { "defaultBranch": "trunk", "paths": ["README.md", "convex/schema.ts", "infra/secrets/prod.env", "src/config/load.ts", "tests/config/load.test.ts"] },
+    "example-org/unfed-service": { "defaultBranch": "main", "paths": ["src/config/load.ts", "tests/config/load.test.ts"] }
+  }
+}

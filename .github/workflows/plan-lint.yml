@@ -1,0 +1,109 @@
+# plan-lint — the run of record on EVERY pull request (design §5.5, D18; review findings 1 and 2).
+#
+# Two jobs, split by trust:
+#
+#   offline  on `pull_request`. Runs the PR's OWN code — its type check, its tests, its linter over
+#            its own diff — rules 1–9 only. It holds no secret and a read-only token, so a PR that
+#            edits lint/** can run whatever it likes here and reach nothing.
+#
+#   trusted  on `pull_request_target`. Runs the BASE branch's linter, rules 1–12, with
+#            ALISSA_API_TOKEN. It checks out the base commit only, installs the base's lockfile,
+#            then fetches the PR's commits as git objects and reads plans/** from them as data
+#            (`plan-lint --pr` reads blobs with `git cat-file`; nothing of the PR is written to the
+#            work tree or executed). It publishes the check run named `plan-lint` on the PR's head
+#            commit — `success` with "nothing to lint" when no plans/** file changed — which is the
+#            check a ruleset requires and the close edge reads (§5.5 rule 13).
+#
+# ALISSA_API_TOKEN is an ENVIRONMENT secret of `alissa-plan-lint`, never a repository secret, and only the
+# trusted job names that environment. On `pull_request` GitHub runs the workflow file from the PR's
+# head, so a same-repository PR could add a job reading any repository secret. An environment whose
+# deployment branches are limited to the default branch admits the `pull_request_target` job (its
+# ref is the base branch) and refuses any job a PR writes (its ref is refs/pull/<n>/merge).
+#
+# There is no `paths:` filter: a required check must report on every PR. Nothing here names a
+# repository; the workflow's own context does. lint/test/workflow.test.ts pins this structure.
+name: plan-lint
+
+on:
+  pull_request:
+  pull_request_target:
+
+permissions: {}
+
+jobs:
+  offline:
+    name: plan-lint (offline, the PR's code)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Install
+        run: npm ci
+      - name: Type check
+        run: npm run typecheck
+      - name: Test
+        run: npm test
+      - name: Lint the pull request's plan (rules 1–9)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node lint/plan-lint.ts --pr --offline --base "$BASE_SHA" --head "$HEAD_SHA" --summary-file "$GITHUB_STEP_SUMMARY"
+
+  trusted:
+    name: plan-lint (trusted, the base branch's code)
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    environment: alissa-plan-lint
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - name: Check out the base branch, never the pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Install the base branch's dependencies
+        run: npm ci --ignore-scripts
+      - name: Fetch the pull request's commits as objects only
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.extraheader=$auth" fetch --no-tags --no-recurse-submodules origin "+refs/pull/${PR_NUMBER}/head:refs/remotes/pull/head"
+          git cat-file -e "${HEAD_SHA}^{commit}" || git -c "http.extraheader=$auth" fetch --no-tags --no-recurse-submodules origin "$HEAD_SHA"
+      - name: Lint the pull request's plan with the base branch's linter (rules 1–12)
+        env:
+          ALISSA_API_TOKEN: ${{ secrets.ALISSA_API_TOKEN }}
+          BASE_SHA: ${{ github.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node lint/plan-lint.ts --pr --base "$BASE_SHA" --head "$HEAD_SHA" --summary-file "$GITHUB_STEP_SUMMARY" --check-output "$RUNNER_TEMP/plan-lint-check.json"
+      - name: Publish the plan-lint check run on the pull request's head commit
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          out="$RUNNER_TEMP/plan-lint-check.json"
+          if [ ! -s "$out" ]; then
+            jq -n '{conclusion: "failure", title: "plan-lint could not run", summary: "The trusted job stopped before the linter reported; see the workflow run."}' > "$out"
+          fi
+          jq --arg sha "$HEAD_SHA" '{name: "plan-lint", head_sha: $sha, status: "completed", conclusion: .conclusion, output: {title: .title, summary: (.summary | .[0:65000])}}' "$out" \
+            | gh api --method POST "repos/$GITHUB_REPOSITORY/check-runs" --input -

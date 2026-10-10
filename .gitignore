@@ -1,0 +1,24 @@
+# Dependencies and build output of the plan-lint tooling (TypeScript on Node)
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Secrets and local environment — the planner's token is a repository secret, never a file here
+.env
+.env.*
+!.env.example
+
+# Logs and scratch
+*.log
+npm-debug.log*
+.plan-lint/
+tmp/
+
+# Editors and operating systems
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~

@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/ali-fhr/alissa-plans/schema/plan-frontmatter.v1.json",
+  "title": "alissa-plans plan.md frontmatter, version 1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "title", "anchor", "program", "sources", "budget"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9][a-z0-9-]{2,47}$" },
+    "title": { "type": "string", "minLength": 8, "maxLength": 200 },
+    "anchor": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["kind", "milestoneId"], "properties": { "kind": { "const": "milestone" }, "milestoneId": { "$ref": "#/definitions/convexId" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "milestoneId", "criterionId"], "properties": { "kind": { "const": "criterion" }, "milestoneId": { "$ref": "#/definitions/convexId" }, "criterionId": { "type": "string", "minLength": 1 } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "objectiveId"], "properties": { "kind": { "const": "objective" }, "objectiveId": { "$ref": "#/definitions/convexId" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "class"], "properties": { "kind": { "const": "exhaust" }, "class": { "type": "string", "enum": ["gate-verification", "drift-fix", "flaky-test", "exhaust-followup", "doc-correction"] } } }
+      ]
+    },
+    "program": { "$ref": "#/definitions/convexId" },
+    "milestone": { "$ref": "#/definitions/convexId" },
+    "sources": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key", "evidence"],
+        "properties": { "key": { "type": "string", "pattern": "^(gate|later|minor|esc|drift|stale):[^\\s]+$" }, "evidence": { "type": "string", "minLength": 1, "maxLength": 200 } }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["estimateUsd", "basis"],
+      "properties": { "estimateUsd": { "type": "number", "minimum": 0 }, "basis": { "type": "string", "minLength": 1, "maxLength": 200 } }
+    },
+    "supersedes": { "type": "string", "pattern": "^plans/[0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9][a-z0-9-]{2,47}$" }
+  },
+  "definitions": {
+    "convexId": { "type": "string", "pattern": "^[a-z0-9]{32}$" }
+  }
+}

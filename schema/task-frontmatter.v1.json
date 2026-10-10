@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/ali-fhr/alissa-plans/schema/task-frontmatter.v1.json",
+  "title": "alissa-plans task frontmatter, version 1.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "title", "repo", "milestone", "priority", "dependsOn", "scope", "commitClass"],
+  "properties": {
+    "id": { "$ref": "#/definitions/slug" },
+    "title": { "type": "string", "minLength": 8, "maxLength": 200 },
+    "repo": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+    "milestone": { "$ref": "#/definitions/convexId" },
+    "priority": { "type": "string", "enum": ["low", "medium", "high", "top"] },
+    "dependsOn": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "type"],
+            "properties": { "id": { "$ref": "#/definitions/slug" }, "type": { "$ref": "#/definitions/edgeType" } }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["task", "type"],
+            "properties": { "task": { "type": "string", "pattern": "^TASK-[0-9]+$" }, "type": { "$ref": "#/definitions/edgeType" } }
+          }
+        ]
+      }
+    },
+    "scope": { "type": "array", "minItems": 1, "maxItems": 12, "uniqueItems": true, "items": { "type": "string", "pattern": "^[^\\s,]+$" } },
+    "kind": { "type": "string", "enum": ["code", "design"] },
+    "new": {
+      "description": "Scope paths that do not exist yet at the repository's default branch; every entry is also in scope (plan-lint rule 2).",
+      "type": "array",
+      "maxItems": 12,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[^\\s,*]+$" }
+    },
+    "commitClass": {
+      "type": "string",
+      "enum": ["schema-migration", "auth-secrets", "pricing-billing", "customer-promise", "product-surface", "gate-verification", "drift-fix", "flaky-test", "exhaust-followup", "doc-correction"]
+    },
+    "sources": { "type": "array", "maxItems": 16, "uniqueItems": true, "items": { "$ref": "#/definitions/sourceKey" } }
+  },
+  "definitions": {
+    "slug": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,47}$" },
+    "convexId": { "type": "string", "pattern": "^[a-z0-9]{32}$" },
+    "edgeType": { "type": "string", "enum": ["hard", "soft", "acceptance"] },
+    "sourceKey": { "type": "string", "pattern": "^(gate|later|minor|esc|drift|stale):[^\\s]+$" }
+  }
+}

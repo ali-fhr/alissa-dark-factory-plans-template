@@ -1,0 +1,53 @@
+{
+  "planKey": "genloop:2026-09-28:operator-surface-l3-l4",
+  "source": "docs/design/loop-operator-surface.md §9 (L3, L4)",
+  "tasks": [
+    {
+      "frontmatter": {
+        "id": "release-stamp",
+        "title": "genloop G4-3: the release decision stamped on the task at loop-event ingest",
+        "repo": "ali-fhr/studio.alissa.app",
+        "milestone": "k17ex000000000000000000000000000",
+        "priority": "high",
+        "dependsOn": [],
+        "scope": ["convex/loopEvents.ts", "convex/core/loopReleaseStamp.ts", "convex/schema.ts", "tests/loopReleaseStamp.test.ts"],
+        "commitClass": "product-surface"
+      },
+      "body": {
+        "description": "Fold the newest release.*, feed.detached, merge.* and close.* loop events into an optional tasks.loop stamp at ingest, as docs/design/loop-operator-surface.md §5.2 specifies: the release state, the hold with its kind parsed from the narration prefix until orcloop stamps data.hold, the conflicting paths, since, the issue and PR numbers, the merge state. Serve the stamp on view=loop. The fold runs inside doPostLoopEvents on the rows that carry a taskNumber the user owns; an event older than the stamp's at never overwrites it. Read the design's §2.5, §2.6 and §5 before writing code; the hold-kind union is pinned there and in packages/client/src/schemas/tasks.ts. Tests on a fake db: one fixture per narration prefix, an out-of-order ingest, an unknown task number.",
+        "definitionOfDone": "tasks.loop is written at ingest and served on view=loop; PR flipped draft → ready-for-review, review loop converged, PR URL attached as evidence.",
+        "validationCriteria": [
+          { "description": "Each narration prefix of §2.6 folds to its HoldKind with the conflicting paths extracted" },
+          { "description": "An older event never overwrites a newer stamp; an unknown taskNumber writes nothing" },
+          { "description": "view=loop carries the stamp; the root suite is green" }
+        ]
+      },
+      "newPaths": ["convex/core/loopReleaseStamp.ts", "tests/loopReleaseStamp.test.ts"]
+    },
+    {
+      "frontmatter": {
+        "id": "program-status",
+        "title": "genloop G4-4: program_status and the operator inbox over the stamp, the events and the review envelope",
+        "repo": "ali-fhr/studio.alissa.app",
+        "milestone": "k17ex000000000000000000000000000",
+        "priority": "high",
+        "dependsOn": [
+          { "id": "release-stamp", "type": "hard" },
+          { "task": "TASK-1311376910", "type": "acceptance" }
+        ],
+        "scope": ["convex/core/programStatus.ts", "convex/programStatus.ts", "convex/operatorInbox.ts", "api/src/routes/loop.ts", "tests/programStatus.test.ts"],
+        "commitClass": "product-surface"
+      },
+      "body": {
+        "description": "Build the fold of docs/design/loop-operator-surface.md §4: per lane the task, the release stamp, the issue and PR links from view=loop, the newest event per kind by task number, the review task's newest Review verdict evidence row reached through the two downstream edges, the Merge-Readiness line parsed from it, and the next human action by the ordered table of §4.2. Expose it as GET /v1/loop/status over a project, a body of work or a task list, and derive the operator inbox of §4.3 with its episode keys, the loop_needs_you notification and the peer message. No GitHub read. Tests on a fake db with a fixture program of five lanes covering every next-human action, and one test that the fold reads no index the design does not name.",
+        "definitionOfDone": "GET /v1/loop/status and GET /v1/loop/inbox answer the shapes of §4.1 and §4.3; PR flipped draft → ready-for-review, review loop converged, PR URL attached as evidence.",
+        "validationCriteria": [
+          { "description": "Every row of the next-human table of §4.2 is exercised by the fixture" },
+          { "description": "An inbox item pushes once per episode key and again only when action or since changes" },
+          { "description": "The root suite is green" }
+        ]
+      },
+      "newPaths": ["convex/core/programStatus.ts", "convex/programStatus.ts", "convex/operatorInbox.ts", "tests/programStatus.test.ts"]
+    }
+  ]
+}

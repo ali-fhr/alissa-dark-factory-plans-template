@@ -1,0 +1,28 @@
+{
+  "name": "plan-lint",
+  "version": "1.0.0",
+  "description": "plan-lint: the deterministic linter for the fleet's plans repository (genloop design §5.3, §5.5).",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "bin": {
+    "plan-lint": "lint/plan-lint.ts"
+  },
+  "scripts": {
+    "plan-lint": "node --disable-warning=ExperimentalWarning lint/plan-lint.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --disable-warning=ExperimentalWarning --test \"lint/test/*.test.ts\"",
+    "check": "npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "ajv": "^8.17.1",
+    "minimatch": "^10.0.3",
+    "yaml": "^2.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "typescript": "^5.9.3"
+  }
+}
