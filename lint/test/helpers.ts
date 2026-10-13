@@ -7,9 +7,9 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { httpReader } from "../alissa.ts";
+import { httpPoster, httpReader } from "../alissa.ts";
 import { githubReader } from "../github.ts";
-import type { LintOptions } from "../rules.ts";
+import type { KbLintOptions, LintOptions } from "../rules.ts";
 
 export const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 export const FIXTURES = join(ROOT, "fixtures");
@@ -30,13 +30,65 @@ export function loadWorld(): World {
   return JSON.parse(readFileSync(join(FIXTURES, "alissa-world.json"), "utf8")) as World;
 }
 
+/**
+ * The knowledge-base fixtures' Alissa and code state (K6, K7, an assessment's task). It lives here
+ * rather than in fixtures/alissa-world.json, which the plan fixtures own and this lane leaves as is.
+ */
+export const KB_SHA = "3f9c2a1e5b7d4c6e8f0a1b2c3d4e5f60718293a4";
+export const KB_CREATED = Date.UTC(2026, 9, 14, 9, 30);
+
+export interface KbWorld {
+  /** `TASK-<n>` → what `GET /v1/tasks/:id?view=full` answers; `reads` becomes the Alissa-Reads trailer. */
+  tasks: Record<string, { kind: string; createdAt: number; reads?: string }>;
+  /** `<repo>@<sha>:<path>` → the blob and line count Studio's verify route reads there. */
+  files: Record<string, { blob: string; lines: number }>;
+}
+
+export function kbWorld(): KbWorld {
+  const discovery = { kind: "discovery", createdAt: KB_CREATED, reads: `example-org/service-b@${KB_SHA}` };
+  const tasks: KbWorld["tasks"] = {};
+  for (const n of [1234, 1301, 1302, 1303, 1304, 1305, 1307]) tasks[`TASK-${n}`] = { ...discovery };
+  tasks["TASK-1306"] = { ...discovery, kind: "code" };
+  tasks["TASK-2000"] = { kind: "design", createdAt: KB_CREATED };
+  tasks["TASK-2001"] = { kind: "code", createdAt: KB_CREATED };
+  const at = (path: string) => `example-org/service-b@${KB_SHA}:${path}`;
+  return {
+    tasks,
+    files: {
+      [at("src/config/load.ts")]: { blob: "9ad0c1e2f3a4b5c6d7e8f90a1b2c3d4e5f6a7b8c", lines: 900 },
+      [at("src/config/keys.ts")]: { blob: "51be2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c", lines: 64 },
+      [at("config/.env.production")]: { blob: "9ad0c1e2f3a4b5c6d7e8f90a1b2c3d4e5f6a7b8c", lines: 900 },
+    },
+  };
+}
+
 export interface FakeAlissa {
   base: string;
   /** The fake GitHub API's base URL (GITHUB_API_URL). */
   github: string;
   world: World;
+  kb: KbWorld;
+  /** How the verify route answers: `up`, an HTTP status, or an answer of the wrong shape. */
+  verify: "up" | "bad-shape" | number;
+  /** The bodies K7 posted. */
+  verifyBodies: unknown[];
   requests: string[];
   close(): Promise<void>;
+}
+
+/** Studio's `POST /v1/factory/repo-files/verify` (lane DS-3), as the linter expects it to answer. */
+function fakeVerify(kb: KbWorld, body: unknown): { status: number; body: unknown } {
+  const files = (body as { files?: unknown } | null)?.files;
+  if (!Array.isArray(files)) return { status: 400, body: { error: "Bad Request", message: "files is required" } };
+  const results = files.map((f: { repo: string; sha: string; path: string; blob: string; lines: string }) => {
+    const file = kb.files[`${f.repo}@${f.sha}:${f.path}`];
+    if (!file) return { ok: false, reason: "path_missing" };
+    if (file.blob !== f.blob) return { ok: false, reason: "blob_mismatch", detail: `the blob at ${f.sha.slice(0, 7)} is ${file.blob.slice(0, 7)}` };
+    const end = Number(f.lines.split("-").pop());
+    if (end > file.lines) return { ok: false, reason: "lines_out_of_range", detail: `the file has ${file.lines} lines` };
+    return { ok: true };
+  });
+  return { status: 200, body: { results } };
 }
 
 /** Answers GitHub's repository and contents GETs (rule 5b): a path exists when listed or a parent of one. */
@@ -55,8 +107,9 @@ function fakeGithub(world: World, seg: string[], ref: string | null): { status: 
 }
 
 /** Answers the five GETs rules 10–12 make, shaped like the real API's answers. */
-export async function fakeAlissa(world: World = loadWorld()): Promise<FakeAlissa> {
+export async function fakeAlissa(world: World = loadWorld(), kb: KbWorld = kbWorld()): Promise<FakeAlissa> {
   const requests: string[] = [];
+  let api: FakeAlissa | null = null;
   const notFound = (what: string) => ({ error: "Not Found", message: `${what} not found or not accessible.` });
   const server: Server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://x");
@@ -72,8 +125,33 @@ export async function fakeAlissa(world: World = loadWorld()): Promise<FakeAlissa
       return send(out.status, out.body);
     }
     if (req.headers.authorization !== `Bearer ${TOKEN}`) return send(401, { error: "Unauthorized", message: "Invalid or missing token." });
+    if (req.method === "POST" && url.pathname === "/v1/factory/repo-files/verify") {
+      let raw = "";
+      req.on("data", (d) => (raw += d));
+      req.on("end", () => {
+        let parsed: unknown = null;
+        try {
+          parsed = JSON.parse(raw);
+        } catch {
+          parsed = null;
+        }
+        api?.verifyBodies.push(parsed);
+        const mode = api?.verify ?? "up";
+        if (typeof mode === "number") return send(mode, { error: "Unavailable", message: "The verify route is down." });
+        if (mode === "bad-shape") return send(200, { verified: true });
+        const out = fakeVerify(kb, parsed);
+        send(out.status, out.body);
+      });
+      return;
+    }
     if (req.method !== "GET") return send(405, { error: "Method Not Allowed" });
     const seg = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+    if (seg[0] === "v1" && seg[1] === "tasks" && seg.length === 3 && kb.tasks[seg[2] as string]) {
+      const k = kb.tasks[seg[2] as string] as KbWorld["tasks"][string];
+      const full = url.searchParams.get("view") === "full";
+      const description = `A discovery task of the fixtures.\n\nAlissa-Kind: ${k.kind}\n${k.reads ? `Alissa-Reads: ${k.reads}\n` : ""}Autonomous-Dev: example-org/plans`;
+      return send(200, { task: { taskNumber: Number((seg[2] as string).slice(5)), status: "in_progress", kind: k.kind, createdAt: k.createdAt, ...(full ? { description } : {}) } });
+    }
     if (seg[0] !== "v1") return send(404, { error: "Not Found", message: "The requested endpoint does not exist." });
     if (seg[1] === "projects" && seg.length === 3) {
       const p = world.projects[seg[2] as string];
@@ -103,13 +181,42 @@ export async function fakeAlissa(world: World = loadWorld()): Promise<FakeAlissa
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const { port } = server.address() as AddressInfo;
-  return {
+  api = {
     base: `http://127.0.0.1:${port}`,
     github: `http://127.0.0.1:${port}/github`,
     world,
+    kb,
+    verify: "up",
+    verifyBodies: [],
     requests,
     close: () => new Promise<void>((r) => server.close(() => r())),
   };
+  return api;
+}
+
+/** Online knowledge-base options against a fake: K6 through `api`'s tasks, K7 through its verify route. */
+export function kbOnlineAgainst(api: FakeAlissa, prTask: string | null = null, token = TOKEN): KbLintOptions {
+  return { online: true, reader: httpReader({ base: api.base, token, retries: 0 }), verifier: httpPoster({ base: api.base, token, retries: 0 }), prTask };
+}
+
+/** A knowledge-base fixture case: its one findings directory, or its one assessment file. */
+export function kbFixture(caseName: string): string {
+  const kb = join(FIXTURES, caseName, "knowledge-base");
+  const assessments = join(kb, "assessments");
+  try {
+    const files = readdirSync(assessments);
+    if (files.length !== 1) throw new Error(`${assessments} must hold exactly one assessment`);
+    return join(assessments, files[0] as string);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+  let dir = kb;
+  for (let depth = 0; depth < 4; depth++) {
+    const entries = readdirSync(dir);
+    if (entries.length !== 1) throw new Error(`${dir} must hold exactly one entry, found ${entries.join(", ")}`);
+    dir = join(dir, entries[0] as string);
+  }
+  return dir;
 }
 
 /** Online lint options against a fake: rules 10–12 through `api`, rule 5b through its fake GitHub. */
@@ -138,7 +245,7 @@ export async function runCli(args: string[], env: Record<string, string | undefi
   const clean: Record<string, string> = {};
   // Never the ambient tokens or APIs: an online run reads only the fakes, and GitHub defaults to a
   // closed port so no test ever reaches the real one.
-  const inherited = new Set(["ALISSA_API_TOKEN", "ALISSA_BASE", "GITHUB_TOKEN", "GH_TOKEN", "GITHUB_API_URL"]);
+  const inherited = new Set(["ALISSA_API_TOKEN", "ALISSA_BASE", "GITHUB_TOKEN", "GH_TOKEN", "GITHUB_API_URL", "GITHUB_HEAD_REF"]);
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !inherited.has(k)) clean[k] = v;
   clean.GITHUB_API_URL = "http://127.0.0.1:9";
   for (const [k, v] of Object.entries(env)) if (v !== undefined) clean[k] = v;

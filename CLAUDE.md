@@ -17,7 +17,7 @@ per-fleet configuration (default `<owner>/alissa-dark-factory-plans`) — never 
    pull request CI runs it twice — the `offline` job over the PR's own code (rules 1–9, no secret)
    and the `trusted` job over the base branch's code (rules 1–12, `ALISSA_API_TOKEN` from the
    `alissa-plan-lint` environment) — and the trusted job publishes the `plan-lint` check on the head
-   commit, "nothing to lint" when no `plans/**` file changed. The default branch's ruleset
+   commit, "nothing to lint" when no `plans/**` or `knowledge-base/**` file changed. The default branch's ruleset
    requires that check, so a refused plan cannot merge.
 3. **Never touch a merged plan's directory.** A merged plan is immutable (D20). Do not edit,
    rename, delete or add to any `plans/<dir>/` that exists on `main` — `plan-lint` refuses the
@@ -40,8 +40,20 @@ per-fleet configuration (default `<owner>/alissa-dark-factory-plans`) — never 
    quoted from the design without drift and pinned by a test in the plan-lint lane. Only the
    repository name differs from the design text, by the operator's decision.
 
+## The knowledge base
+
+`knowledge-base/` holds discovery findings (README, *The knowledge base*; design
+`alissa-build-discovery.md` §2–§4). A discovery session writes exactly one new directory,
+`knowledge-base/<YYYY>/<MM>/<DD>/TASK-<n>/` (its task's creation day, UTC), holding `findings.md`
+and nothing else; milestone 0's design task writes exactly one `knowledge-base/assessments/*.md`
+file instead. Run `node lint/plan-lint.ts --kb <dir>` before pushing — rules K1–K7, K7 through
+Studio's verify route — and never push a finding your own run refuses. A merged finding is never
+edited: a newer finding names it in `reverifies`. A knowledge-base PR never carries a plan, and a
+plan PR never touches `knowledge-base/`.
+
 ## Non-plan changes
 
 Tooling (the linter, schemas, fixtures, the workflow) and documentation land through ordinary
 `TASK-<n>-…` branches and pull requests, never together with a plan directory: the two branch
-grammars are what let devloop and revloop tell a code PR from a plan PR.
+grammars are what let devloop and revloop tell a code PR from a plan PR. A tooling change that
+moves what the linter can do also moves `lint/VERSION`, the stamp Studio reads.

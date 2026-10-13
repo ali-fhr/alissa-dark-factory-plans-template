@@ -1,5 +1,7 @@
 // c3: the plan schema equals design §5.3 byte for byte, and the task schema equals §5.3's block with
-// exactly the additions of schema v1.1 (loop-operator-surface §9 L12) and nothing else, both pinned
+// exactly the additions of schema v1.1 (loop-operator-surface §9 L12) and of v1.2 (alissa-build-
+// discovery §2.2, lane DS-2: kind `discovery`, `questions`, no scope on a discovery task) and nothing
+// else, both pinned
 // at named commits; the README's layout section quotes §5.1 and §5.2 without drift. Each design is
 // read with `gh api` at its pinned commit when gh can reach it; otherwise from a committed snapshot
 // whose digest is pinned below and which the online run proves equal to the design.
@@ -67,8 +69,11 @@ type Schema = {
   $id: string;
   title: string;
   required: string[];
-  properties: Record<string, { type?: string; items?: unknown; uniqueItems?: boolean; maxItems?: number }>;
+  properties: Record<string, { type?: string; items?: unknown; uniqueItems?: boolean; maxItems?: number; minItems?: number }>;
   definitions: Record<string, unknown>;
+  if?: unknown;
+  then?: unknown;
+  else?: unknown;
 };
 
 function jsonBlocks(text: string): string[] {
@@ -124,20 +129,33 @@ describe("design pin", () => {
     assert.equal(file, `${blockOf("plan-frontmatter.v1.json")}\n`, "the file is the block's lines, newline-terminated");
   });
 
-  it("schema/task-frontmatter.v1.json is §5.3's block bumped in place to v1.1 — L12's three additions and nothing else", () => {
+  it("schema/task-frontmatter.v1.json is §5.3's block bumped in place to v1.2 — L12's three additions, DS-2's discovery branch, nothing else", () => {
     const v1 = JSON.parse(blockOf("task-frontmatter.v1.json")) as Schema;
     const file = JSON.parse(readFileSync(join(ROOT, "schema", "task-frontmatter.v1.json"), "utf8")) as Schema;
     assert.equal(file.$id, v1.$id, "the $id is unchanged, so every $ref to it holds");
-    assert.equal(file.title, v1.title.replace(/version 1$/, "version 1.1"));
-    const { kind, new: newPaths, ...rest } = file.properties;
-    assert.deepEqual(kind, { type: "string", enum: ["code", "design"] });
+    assert.equal(file.title, v1.title.replace(/version 1$/, "version 1.2"));
+    const { kind, new: newPaths, questions, ...rest } = file.properties;
+    assert.deepEqual(kind, { type: "string", enum: ["code", "design", "discovery"] }, "v1.2 widens kind to discovery");
+    assert.equal(questions?.type, "array");
+    assert.deepEqual([questions?.minItems, questions?.maxItems], [1, 12], "1–12 questions (§2.2)");
+    assert.deepEqual(file.if, { required: ["kind"], properties: { kind: { const: "discovery" } } });
+    assert.deepEqual(file.then, {
+      description: "A discovery task names no scope (feed_plan derives it under knowledge-base/) and is always doc-correction.",
+      required: ["questions"],
+      properties: { scope: false, new: false, questions: true, commitClass: { const: "doc-correction" } },
+    });
+    assert.deepEqual(file.else, { required: ["scope"], properties: { scope: true, questions: false } });
+    assert.ok(v1.required.includes("scope") && !file.required.includes("scope"), "scope moves from required to the else branch");
     assert.deepEqual(newPaths?.items, { type: "string", pattern: "^[^\\s,*]+$" }, "new[] holds literal paths, as feed_plan's newPaths");
     assert.equal(newPaths?.type, "array");
     assert.equal(newPaths?.uniqueItems, true);
     assert.equal(newPaths?.maxItems, 12);
     assert.deepEqual(file.definitions.edgeType, { type: "string", enum: ["hard", "soft", "acceptance"] });
     assert.ok(!file.required.includes("kind") && !file.required.includes("new"), "both additions are optional");
-    const back = { ...file, title: v1.title, properties: rest, definitions: { ...file.definitions, edgeType: v1.definitions.edgeType } };
+    const { oneLine, question, ...definitions } = file.definitions;
+    assert.ok(oneLine && question, "v1.2 adds the question definitions");
+    const { if: _if, then: _then, else: _else, ...base } = file;
+    const back = { ...base, title: v1.title, required: v1.required, properties: rest, definitions: { ...definitions, edgeType: v1.definitions.edgeType } };
     assert.deepEqual(back, v1, "with the additions taken out, the schema is §5.3's");
   });
 
@@ -190,6 +208,30 @@ describe("design pin", () => {
     assert.ok(!task({ ...fm, dependsOn: [{ id: "release-stamp", type: "accept" }] }));
     assert.ok(!task({ ...fm, new: ["convex/**"] }), "a glob is never declared new");
     assert.ok(!task({ ...fm, newPaths: [] }), "the file's field is `new`, not feed_plan's `newPaths`");
+  });
+
+  it("schema v1.2: a discovery task has 1–12 questions, no scope or new, and is doc-correction; a code task the reverse", () => {
+    const validate = schemas().task;
+    // A plain boolean: ajv's type guard would narrow each argument after a negative assertion.
+    const task = Object.assign((x: unknown): boolean => validate(x) === true, { get errors() { return validate.errors; } });
+    const q1 = { id: "q1", text: "Where does an order's total get computed?", unblocks: [{ decision: "Whether milestone 2 touches discounts", impact: "high" }] };
+    const fm = {
+      id: "orders-total", title: "Where is an order's total computed", repo: "acme/shop-api", milestone: "k".repeat(32), priority: "high",
+      dependsOn: [], commitClass: "doc-correction", kind: "discovery",
+      questions: [q1],
+    };
+    assert.ok(task(fm), JSON.stringify(task.errors));
+    assert.ok(!task({ ...fm, scope: ["src/orders/service.ts"] }), "a discovery task with a scope is refused");
+    assert.ok(!task({ ...fm, new: ["src/x.ts"] }));
+    assert.ok(!task({ ...fm, questions: undefined }), "questions are required");
+    assert.ok(!task({ ...fm, questions: [] }));
+    assert.ok(!task({ ...fm, commitClass: "drift-fix" }), "always doc-correction");
+    assert.ok(!task({ ...fm, questions: [{ ...q1, text: "two\nlines" }] }), "one line, as feed_plan renders it above the trailers");
+    assert.ok(!task({ ...fm, questions: [{ ...q1, unblocks: [{ decision: "d", impact: "huge" }] }] }));
+    const { kind: _k, questions: _q, ...code } = fm;
+    assert.ok(!task(code), "a code task without scope is refused");
+    assert.ok(task({ ...code, scope: ["src/a.ts"] }));
+    assert.ok(!task({ ...code, scope: ["src/a.ts"], questions: fm.questions }), "questions are discovery's alone");
   });
 
   it("the README's layout section quotes §5.1 and §5.2 without drift (only the plans repository's name differs)", () => {

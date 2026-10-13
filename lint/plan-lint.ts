@@ -4,24 +4,28 @@
 //   plan-lint [--offline] [--base <ref> | --no-base] <plan-dir>
 //   plan-lint --write [--offline] [--base <ref> | --no-base] <plan-dir>
 //   plan-lint --pr --base <rev> --head <rev> [--repo <path>] [--offline]
+//   plan-lint --kb <findings-dir | assessment.md> [--offline] [--base <ref> | --no-base] [--task TASK-<n>]
 //
 // Rules 1–9 need no network; rules 10–12 read Alissa with ALISSA_API_TOKEN (ALISSA_BASE overrides
 // https://api.alissa.app), and rule 5b reads each task's repository on GitHub (GITHUB_TOKEN or
 // GH_TOKEN when set; GITHUB_API_URL overrides https://api.github.com). --offline runs rules 1–9 only. --summary-file <path> appends a Markdown
 // report; --check-output <path> writes { conclusion, title, summary } for a check run.
+// A pull request that changes any knowledge-base/** file is linted in the knowledge-base mode, K1–K7
+// (design alissa-build-discovery §3.4): K1–K5 offline, K6 reads the task, K7 posts the cites to
+// Studio's verify route; --kb runs the same rules over a local directory.
 // Exit status: 0 passed (or nothing to lint), 1 refused, 2 usage or internal error.
 import { appendFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { httpReader } from "./alissa.ts";
+import { httpPoster, httpReader } from "./alissa.ts";
 import { DEFAULT_GITHUB_API, githubReader } from "./github.ts";
 import { parseFrontmatter, splitFrontmatter } from "./markdown.ts";
 import {
   DAG_BEGIN, DAG_END, SUMMARY_BEGIN, SUMMARY_END, ensureMarkers, renderDag, renderSummary, taskView, writeRegion, type TaskView,
 } from "./render.ts";
-import { type LintResult, RULE_NAMES, lint } from "./rules.ts";
-import { type PlanSource, UsageError, isTaskPath, readPlanDir, readPlanFromGit } from "./source.ts";
+import { type KbLintOptions, type KbLintResult, K_RULE_NAMES, type LintResult, RULE_NAMES, lint, lintKb, taskOfBranch } from "./rules.ts";
+import { type PlanSource, UsageError, isTaskPath, readKbDir, readPlanDir, readPlanFromGit } from "./source.ts";
 
 export const DEFAULT_ALISSA_BASE = "https://api.alissa.app";
 
@@ -37,7 +41,7 @@ export function nothingToLint(changed: number): Report {
   return {
     conclusion: "success",
     title,
-    summary: `**plan-lint: ${title}.** The pull request changes ${changed} file(s), none under \`plans/\`.`,
+    summary: `**plan-lint: ${title}.** The pull request changes ${changed} file(s), none under \`plans/\` or \`knowledge-base/\`.`,
     lines: [`plan-lint: ${title}`],
   };
 }
@@ -66,6 +70,30 @@ export function report(r: LintResult): Report {
   if (r.notes.length > 0) md.push("", "Notes:", "", ...r.notes.map((n) => `- ${n}`));
   const warned = r.warnings.length > 0 ? ` — ${r.warnings.length} warning(s)` : "";
   const title = first ? `FAIL — rule ${first.rule} (${RULE_NAMES[first.rule]}) — ${r.plan}` : `PASS — ${r.plan} — plan class ${r.planClass ?? "none"}${warned}`;
+  return { conclusion: first ? "failure" : "success", title, summary: md.join("\n"), lines };
+}
+
+/** The knowledge-base mode's report. Its titles say `knowledge-base`, which the merge edge reads (§3.5). */
+export function reportKb(r: KbLintResult): Report {
+  const last = r.rulesRun[r.rulesRun.length - 1];
+  const ran = r.rulesRun.length === 2 ? r.rulesRun.join(", ") : `${r.rulesRun[0]}–${last}`;
+  const what = r.kind === "assessment" ? "assessment" : `${r.questionCount} question(s)`;
+  const head = `${r.target} — knowledge-base mode — ${what} — ${ran}`;
+  const lines = [`plan-lint: ${head}`];
+  const first = r.failures[0];
+  const fmt = (f: { rule: keyof typeof K_RULE_NAMES; file?: string; message: string }): string =>
+    `${f.rule} (${K_RULE_NAMES[f.rule]})${f.file ? ` — ${f.file}` : ""}: ${f.message}`;
+  if (first) {
+    lines.push(`plan-lint: FAIL ${fmt(first)}`);
+    for (const f of r.failures.slice(1)) lines.push(`plan-lint:   also ${fmt(f)}`);
+  } else lines.push("plan-lint: PASS");
+  for (const n of r.notes) lines.push(`plan-lint:   note: ${n}`);
+  const md = [`**plan-lint** · \`${r.target}\` · knowledge-base mode · ${what} · ${ran}`, "", first ? `**FAIL — ${fmt(first)}**` : "**PASS**"];
+  if (r.failures.length > 1) md.push("", "Every finding, in rule order:", "", ...r.failures.map((f) => `- ${fmt(f)}`));
+  if (r.notes.length > 0) md.push("", "Notes:", "", ...r.notes.map((n) => `- ${n}`));
+  const title = !first ? `PASS — knowledge-base — ${r.target}`
+    : first.couldNotRun ? `plan-lint could not run — ${first.rule} (${K_RULE_NAMES[first.rule]}) — ${r.target}`
+    : `FAIL — ${first.rule} (${K_RULE_NAMES[first.rule]}) — knowledge-base — ${r.target}`;
   return { conclusion: first ? "failure" : "success", title, summary: md.join("\n"), lines };
 }
 
@@ -98,9 +126,11 @@ export function writeGenerated(src: PlanSource, dir: string): boolean {
 const USAGE = `usage:
   plan-lint [--offline] [--base <ref> | --no-base] <plan-dir>
   plan-lint --write [--offline] [--base <ref> | --no-base] <plan-dir>
-  plan-lint --pr --base <rev> --head <rev> [--repo <path>] [--offline]
+  plan-lint --pr --base <rev> --head <rev> [--repo <path>] [--offline] [--task TASK-<n>]
+  plan-lint --kb <findings-dir | assessment.md> [--offline] [--base <ref> | --no-base] [--task TASK-<n>]
 options: --summary-file <path>  --check-output <path>
-env: ALISSA_API_TOKEN (rules 10–12), ALISSA_BASE (default ${DEFAULT_ALISSA_BASE}),
+env: ALISSA_API_TOKEN (rules 10–12, K6–K7), ALISSA_BASE (default ${DEFAULT_ALISSA_BASE}),
+     GITHUB_HEAD_REF (the PR's TASK-<n>-… branch, when --task is not given),
      GITHUB_TOKEN or GH_TOKEN (rule 5b, optional), GITHUB_API_URL (default ${DEFAULT_GITHUB_API})`;
 
 export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env): Promise<number> {
@@ -118,6 +148,8 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
         "no-base": { type: "boolean" },
         head: { type: "string" },
         repo: { type: "string" },
+        kb: { type: "string" },
+        task: { type: "string" },
         "summary-file": { type: "string" },
         "check-output": { type: "string" },
         help: { type: "boolean", short: "h" },
@@ -133,11 +165,18 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
   }
   try {
     let out: Report;
+    if (values.task !== undefined && !/^TASK-[1-9][0-9]*$/.test(values.task)) throw new UsageError(`--task \`${values.task}\` is not TASK-<n>`);
+    const prTask = values.task ?? taskOfBranch(env.GITHUB_HEAD_REF);
     if (values.pr) {
-      if (values.write || positionals.length > 0 || !values.base || !values.head) throw new UsageError("--pr takes --base and --head and no directory (and never --write)");
+      if (values.write || values.kb !== undefined || positionals.length > 0 || !values.base || !values.head) throw new UsageError("--pr takes --base and --head and no directory (and never --write or --kb)");
       const read = readPlanFromGit(values.repo ?? process.cwd(), values.base, values.head);
       if (read.kind === "nothing") out = nothingToLint(read.changed.length);
+      else if (read.kind === "kb") out = reportKb(await lintKb(read.source, kbOptionsFor(values.offline === true, env, prTask)));
       else out = report(await lint(read.source, readerFor(values.offline === true, env)));
+    } else if (values.kb !== undefined) {
+      if (values.write || positionals.length > 0 || values.head || values.repo) throw new UsageError("--kb takes one path and no --write, --head, --repo or other directory");
+      const source = readKbDir(values.kb, values["no-base"] ? null : values.base);
+      out = reportKb(await lintKb(source, kbOptionsFor(values.offline === true, env, prTask)));
     } else {
       if (positionals.length !== 1) throw new UsageError("give exactly one plan directory");
       if (values.head || values.repo) throw new UsageError("--head and --repo belong to --pr");
@@ -170,6 +209,15 @@ function readerFor(offline: boolean, env: NodeJS.ProcessEnv): Parameters<typeof 
   const token = env.ALISSA_API_TOKEN;
   if (!token) throw new UsageError("rules 10–12 need ALISSA_API_TOKEN; pass --offline to run rules 1–9 only");
   return { online: true, reader: httpReader({ base: env.ALISSA_BASE || DEFAULT_ALISSA_BASE, token }), github: githubReader(env) };
+}
+
+/** The knowledge-base mode's online half: K6 (and an assessment's task) through the reader, K7 through the verify route. */
+function kbOptionsFor(offline: boolean, env: NodeJS.ProcessEnv, prTask: string | null): KbLintOptions {
+  if (offline) return { online: false, prTask };
+  const token = env.ALISSA_API_TOKEN;
+  if (!token) throw new UsageError("K6–K7 need ALISSA_API_TOKEN; pass --offline to run K1–K5 only");
+  const base = env.ALISSA_BASE || DEFAULT_ALISSA_BASE;
+  return { online: true, reader: httpReader({ base, token }), verifier: httpPoster({ base, token }), prTask };
 }
 
 function isMain(): boolean {
