@@ -1,5 +1,6 @@
-// A read-only Alissa REST client for rules 10–12 (design §5.5). GET only; the token is sent as a
-// Bearer header and never printed. Answers are memoised per path for the run.
+// A read-only Alissa REST client for rules 10–12 (design §5.5) and K6. GET only; the token is sent
+// as a Bearer header and never printed. Answers are memoised per path for the run. K7's one POST —
+// Studio's verify route, a read that takes its question as a body — goes through `httpPoster`.
 
 export interface Answer {
   status: number;
@@ -24,24 +25,30 @@ export interface HttpOptions {
   retryDelayMs?: number;
 }
 
-export function httpReader(opts: HttpOptions): AlissaReader {
+/** A POST whose answer is a read: Studio's `POST /v1/factory/repo-files/verify` (K7). */
+export interface AlissaPoster {
+  post(path: string, body: unknown): Promise<Answer>;
+}
+
+function requester(opts: HttpOptions): (method: "GET" | "POST", path: string, body?: unknown) => Promise<Answer> {
   const base = opts.base.replace(/\/+$/, "");
   const doFetch = opts.fetchImpl ?? fetch;
   const retries = opts.retries ?? 2;
   const delay = opts.retryDelayMs ?? 1000;
-  const cache = new Map<string, Promise<Answer>>();
 
-  async function once(path: string): Promise<Answer> {
+  return async function once(method, path, body): Promise<Answer> {
     for (let attempt = 0; ; attempt++) {
       let res: Response;
       try {
         res = await doFetch(`${base}${path}`, {
-          method: "GET",
+          method,
           headers: {
             Accept: "application/json",
+            ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
             ...(opts.token ? { Authorization: `Bearer ${opts.token}` } : {}),
             ...opts.headers,
           },
+          ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
           signal: AbortSignal.timeout(opts.timeoutMs ?? 20_000),
           redirect: "error",
         });
@@ -50,33 +57,43 @@ export function httpReader(opts: HttpOptions): AlissaReader {
           await sleep(delay * (attempt + 1));
           continue;
         }
-        throw new AlissaUnavailable(`GET ${path} failed: ${err instanceof Error ? err.message : String(err)}`);
+        throw new AlissaUnavailable(`${method} ${path} failed: ${err instanceof Error ? err.message : String(err)}`);
       }
       if ((res.status === 429 || res.status >= 500) && attempt < retries) {
         await sleep(delay * (attempt + 1));
         continue;
       }
       const text = await res.text();
-      let body: unknown = null;
+      let parsed: unknown = null;
       try {
-        body = text === "" ? null : JSON.parse(text);
+        parsed = text === "" ? null : JSON.parse(text);
       } catch {
-        body = null;
+        parsed = null;
       }
-      return { status: res.status, body };
+      return { status: res.status, body: parsed };
     }
-  }
+  };
+}
 
+export function httpReader(opts: HttpOptions): AlissaReader {
+  const once = requester(opts);
+  const cache = new Map<string, Promise<Answer>>();
   return {
     get(path: string): Promise<Answer> {
       let p = cache.get(path);
       if (!p) {
-        p = once(path);
+        p = once("GET", path);
         cache.set(path, p);
       }
       return p;
     },
   };
+}
+
+/** No memo: K7 posts once per run. */
+export function httpPoster(opts: HttpOptions): AlissaPoster {
+  const once = requester(opts);
+  return { post: (path, body) => once("POST", path, body) };
 }
 
 /** The API's own error text, for a finding; never the request headers. */

@@ -25,16 +25,22 @@ nothing in this repository names it.
 ├── README.md                              ← this file
 ├── CLAUDE.md                              ← operating notes for the fleet's sessions here
 ├── .gitignore
-└── plans/                                 ← one directory per plan; empty until the first plan merges
-    └── <yyyy-mm-dd>-<slug>/               ← the plan's id, on branch PLAN-<stamp>-<slug>
-        ├── plan.md                        ← the plan (frontmatter + prose, §5.2)
-        ├── tasks/
-        │   └── <id>.md                    ← one file per task, 1–8 of them (§5.2)
-        └── materialized.json              ← written by the close edge AFTER the merge (D20)
+├── plans/                                 ← one directory per plan; empty until the first plan merges
+│   └── <yyyy-mm-dd>-<slug>/               ← the plan's id, on branch PLAN-<stamp>-<slug>
+│       ├── plan.md                        ← the plan (frontmatter + prose, §5.2)
+│       ├── tasks/
+│       │   └── <id>.md                    ← one file per task, 1–8 of them (§5.2)
+│       └── materialized.json              ← written by the close edge AFTER the merge (D20)
+└── knowledge-base/                        ← discovery findings, append-only (see "The knowledge base" below)
+    ├── <YYYY>/<MM>/<DD>/TASK-<n>/         ← one discovery task: its creation day (UTC) and number
+    │   └── findings.md                    ← schema/findings.v1.json frontmatter + prose; nothing else
+    └── assessments/
+        └── <project-slug>-<yyyy-mm-dd>.md ← milestone 0's assessment, from its one design task
 ```
 
 The plan-lint lane (design §9 L8) adds `schema/`, `lint/`, `fixtures/`, `package.json`,
-`tsconfig.json` and `.github/workflows/plan-lint.yml` beside these; a plan PR never touches them.
+`tsconfig.json` and `.github/workflows/plan-lint.yml` beside these; a plan PR never touches them,
+and neither does a knowledge-base PR.
 
 The two sections below are quoted from the design (§5.1 and §5.2 of v0.2) **without drift** —
 the plan-lint lane pins them with a test — with the single substitution of the plans repository's name.
@@ -242,8 +248,9 @@ kind: code            # optional, code | design (default code)
   are warnings by design (D12), listed under the verdict and counted in the check's title. `ALISSA_BASE` overrides
   `https://api.alissa.app`.
 - **`--pr --base <rev> --head <rev>`** is the CI mode: it lints what the pull request changed,
-  reading every file of `plans/**` from git objects as data, and succeeds with *nothing to lint*
-  when no `plans/**` file changed.
+  reading every file of `plans/**` and `knowledge-base/**` from git objects as data. Any
+  `knowledge-base/**` change selects the knowledge-base mode (below); otherwise a `plans/**` change
+  is a plan, and a pull request that changes neither succeeds with *nothing to lint*.
 
 **The workflow** (`.github/workflows/plan-lint.yml`) runs on every pull request, with no path
 filter, as two jobs split by trust. The **offline** job (`pull_request`) runs the pull request's own
@@ -252,17 +259,89 @@ The **trusted** job (`pull_request_target`) checks out the base branch only, ins
 lockfile, fetches the pull request's commits as objects, runs the base branch's linter over them
 with `ALISSA_API_TOKEN` from the `alissa-plan-lint` environment (rules 1–12), and publishes the check run
 named **`plan-lint`** on the pull request's head commit — `success` with *nothing to lint* when no
-`plans/**` file changed. That check run is the run of record: the one a ruleset requires and the close edge reads (§5.5 rule 13).
+`plans/**` or `knowledge-base/**` file changed. That check run is the run of record: the one a ruleset requires and the close edge reads (§5.5 rule 13).
 `lint/test/workflow.test.ts` pins this structure, and `lint/test/pr-mode.test.ts` shows that a
 pull request's own linter, package scripts and git drivers never run in the trusted mode.
 
-**The layout** of the tooling: `schema/` (the two schemas, pinned by `lint/test/design.test.ts`
-against the design at a named commit: the plan schema byte-equal to §5.3, the task schema §5.3's
-bumped in place to **version 1.1** — optional `kind`, optional `new[]`, edge type widened to
-`acceptance`, `$id` unchanged — with nothing else changed), `lint/` (the linter and its tests),
-`fixtures/` (a golden plan that passes, at least one plan per rule failing exactly that rule —
-`rule-<nn>[b]-<what>`, one per schema v1.1 refusal and one for rule 5b — and the Alissa and GitHub
-state the tests' fake APIs serve for rules 10–12 and 5b).
+**The layout** of the tooling: `schema/` (the plan and task schemas, pinned by
+`lint/test/design.test.ts` against the design at a named commit: the plan schema byte-equal to
+§5.3, the task schema §5.3's bumped in place to **version 1.2** — v1.1's optional `kind`, optional
+`new[]` and edge type widened to `acceptance`; v1.2's `kind: discovery` branch — `$id` unchanged,
+with nothing else changed; and `findings.v1.json`, the knowledge base's), `lint/` (the linter, its
+tests and the `VERSION` stamp), `fixtures/` (a golden plan that passes, at least one plan per rule
+failing exactly that rule — `rule-<nn>[b]-<what>`, one per schema v1.1 refusal and one for rule
+5b — the Alissa and GitHub state the tests' fake APIs serve for rules 10–12 and 5b, and the
+knowledge-base cases `kb-golden`, `kb-assessment` and one `kb-k<n>-<what>` per K rule).
+
+**Schema v1.2 — `kind: discovery`** (design `docs/design/alissa-build-discovery.md` §2.2, lane
+DS-2). A discovery task reads a code repository and writes only the knowledge base, so its task
+file names **no `scope`** (and no `new`) — `feed_plan` derives `knowledge-base/<YYYY>/<MM>/<DD>/TASK-<n>/**`
+when it creates the task — and carries **`questions`** instead, 1–12 of `{ id, text, unblocks:
+[{ decision, impact: high | medium | low }] }`. Its `commitClass` is always `doc-correction`, and
+its `repo` is the repository it reads (rule 12 still checks its feed). A code or design task is
+unchanged: `scope` required, no `questions`.
+
+```yaml
+kind: discovery
+commitClass: doc-correction
+questions:
+  - id: q1
+    text: Where does an order's total get computed, and is it recomputed on edit?
+    unblocks:
+      - { decision: "Whether milestone 2 must touch discount recomputation", impact: high }
+```
+
+## The knowledge base — `plan-lint`'s knowledge-base mode
+
+A discovery task (design `alissa-build-discovery.md` §2–§4) answers its questions about one code
+repository, read at a pinned SHA, and writes exactly one new directory here:
+`knowledge-base/<YYYY>/<MM>/<DD>/TASK-<n>/findings.md`, the date being the task's creation day
+(UTC). Its frontmatter validates against `schema/findings.v1.json` (`schema: alissa-findings/v1`,
+`task`, `project`, `reads` — each repository at its 40-hex SHA — `topics`, `questions` with their
+`status`, `confidence`, `answer` or `reason`, `cites` and `unblocks`, then optional `risks` and
+`suggestedTasks`); its body is a `## Summary` and one section per question. The knowledge base is
+**append-only**: a merged finding is never edited, and a newer one names it in `reverifies`. The
+index of findings is a Studio projection, never a committed file.
+
+Any pull request that changes a `knowledge-base/**` file is linted in the **knowledge-base mode** —
+never *nothing to lint* — under the K rules, numbered apart from §5.5's:
+
+| Rule | Name | Refuses | Reads |
+|---|---|---|---|
+| K1 | layout and immutability | a diff outside **one** new `knowledge-base/<YYYY>/<MM>/<DD>/TASK-<n>/` directory (a mix with `plans/**` included); a directory already on the base branch; anything in it but `findings.md`; a date that is not a real calendar day; a change that is not an add. **The one exception:** exactly one new `knowledge-base/assessments/<project-slug>-<yyyy-mm-dd>.md` file and nothing else, from a `kind: design` task (milestone 0's assessment, §7.1) — the pull request's task is its `TASK-<n>-…` branch (`GITHUB_HEAD_REF`) or `--task` | git; Alissa for the assessment's task |
+| K2 | frontmatter | frontmatter that does not split, parse or validate against `schema/findings.v1.json`; a `task` that is not the directory's; a repeated question id or `reads` repository; a cite of a repository not in `reads` | — |
+| K3 | completeness | an `answered` or `partial` question with no `answer`; an `unanswerable` one with no `reason`; an `answered` one with no cite; a body with no `## Summary` | — |
+| K4 | size | `findings.md` over 32 KB; more than 12 questions, 12 risks, 8 suggested tasks or 24 cites per entry; a cite spanning more than 400 lines; a `## Summary` over 1,200 characters or a question's section over 6,000 | — |
+| K5 | hygiene | a cite of a deny-listed path, or secret-shaped text anywhere in the file (an assessment's too) — the deny-list and token shapes of Studio's `convex/core/repoContextFilter.ts` (NT-2's list as widened by BC1), inlined in `lint/rules.ts` with the commit and filter version they were copied at | — |
+| K6 | task | a `task` that does not resolve, is not `kind: discovery`, was created on another day (UTC) than its directory's, or whose `Alissa-Reads: <owner>/<repo>@<sha>` trailer pins another SHA than `reads` (or another repository) — `GET /v1/tasks/:id?view=full` with the lint token | Alissa |
+| K7 | cites resolve | a cited path that does not exist at its `reads` SHA, whose blob differs from `blob`, or whose line range runs past the file's end — asked of Studio, never of GitHub | Studio |
+
+```sh
+npm run plan-lint -- --kb knowledge-base/2026/10/14/TASK-1234             # K1–K7 (K6–K7 need ALISSA_API_TOKEN)
+npm run plan-lint -- --kb knowledge-base/2026/10/14/TASK-1234 --offline   # K1–K5 only, no network
+npm run plan-lint -- --kb knowledge-base/assessments/shop-2026-10-14.md --task TASK-2000
+```
+
+- **K7 goes through Studio's verify route**, so no GitHub credential ever enters this repository.
+  The linter posts every distinct cite once, `POST /v1/factory/repo-files/verify` with the lint
+  token and the body `{ "files": [{ "repo", "sha", "path", "blob", "lines" }] }`, and expects
+  `200 { "results": [{ "ok": true } | { "ok": false, "reason": "path_missing" | "blob_mismatch" |
+  "lines_out_of_range", "detail"?: "…" }] }`, one result per file in request order.
+- **Fail closed.** When the route is down, answers an error or an unexpected shape — or Alissa
+  cannot be read for K6 — the run reports **`plan-lint could not run`**: the check's conclusion is
+  `failure` and its title starts with those words. It is never a pass. Without `ALISSA_API_TOKEN`
+  the linter refuses to run rather than skip K6–K7.
+- **The check's title says the mode**: `PASS — knowledge-base — <dir>`, `FAIL — K<n> (<name>) —
+  knowledge-base — <dir>`, or `plan-lint could not run — K<n> (<name>) — <dir>`. orcloop's merge
+  edge merges a discovery PR on the first of these (design §3.5).
+- **`lint/VERSION`** is the template's version stamp, `key: value` lines. Studio's advisory
+  readiness check `plans-repo-kb-lint` reads it (design §12 Q2): a plans repository whose stamp
+  lacks `modes: … knowledge-base` gets no discovery tasks planned for it. `lint/test/kb.test.ts`
+  keeps the stamp in step with the schemas and the rules.
+- **Rollout.** The template changes new plans repositories only; the provisioner never overwrites
+  an adopted one. Until an existing repository is upgraded — by an ordinary `TASK-` lane in that
+  repository — its `knowledge-base/` pull requests still pass *nothing to lint*, which is why
+  Studio reads the stamp first.
 
 ## Identities and setup
 
