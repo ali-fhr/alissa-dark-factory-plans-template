@@ -11,9 +11,10 @@
 // https://api.alissa.app), and rule 5b reads each task's repository on GitHub (GITHUB_TOKEN or
 // GH_TOKEN when set; GITHUB_API_URL overrides https://api.github.com). --offline runs rules 1–9 only. --summary-file <path> appends a Markdown
 // report; --check-output <path> writes { conclusion, title, summary } for a check run.
-// A pull request that changes any knowledge-base/** file is linted in the knowledge-base mode, K1–K7
-// (design alissa-build-discovery §3.4): K1–K5 offline, K6 reads the task, K7 posts the cites to
-// Studio's verify route; --kb runs the same rules over a local directory. A pull request that changes
+// A pull request that changes any knowledge-base/** file is linted in the knowledge-base mode, K1–K8
+// (design alissa-build-discovery §3.4): K1–K5 offline, K6 reads the task, K7 posts the repo cites to
+// Studio's verify route and K8 the URL cites to its url-cites route; --kb runs the same rules over a
+// local directory. A finding's report ends with its `Discovery-Review: none | light — <reasons>` line. A pull request that changes
 // any integration-check/** file is linted in the integration-check mode, I1–I9 (design
 // alissa-build-integration-check §3.5): I1, I2 and I4–I8 offline, I3 and I9 read Alissa; --ic runs
 // the same rules over a local run directory.
@@ -26,15 +27,17 @@ import { httpPoster, httpReader } from "./alissa.ts";
 import { DEFAULT_GITHUB_API, githubReader } from "./github.ts";
 import { parseFrontmatter, splitFrontmatter } from "./markdown.ts";
 import {
-  DAG_BEGIN, DAG_END, SUMMARY_BEGIN, SUMMARY_END, ensureMarkers, renderDag, renderSummary, taskView, writeRegion, type TaskView,
+  DAG_BEGIN, DAG_END, SUMMARY_BEGIN, SUMMARY_END, ensureMarkers, renderDag, renderSummary, writeRegion, type TaskView,
 } from "./render.ts";
 import {
   type IcLintOptions, type IcLintResult, I_RULE_NAMES, type KbLintOptions, type KbLintResult, K_RULE_NAMES, type LintResult, RULE_NAMES, lint, lintIc, lintKb,
-  taskOfBranch,
+  discoveryReviewLine, planTaskView, taskOfBranch,
 } from "./rules.ts";
 import { type PlanSource, UsageError, isTaskPath, readIcDir, readKbDir, readPlanDir, readPlanFromGit } from "./source.ts";
 
 export const DEFAULT_ALISSA_BASE = "https://api.alissa.app";
+/** How long K7's and K8's POSTs wait for Studio: K8's route reads up to 48 pages before it answers. */
+export const KB_VERIFY_TIMEOUT_MS = 120_000;
 
 export interface Report {
   conclusion: "success" | "failure";
@@ -80,7 +83,11 @@ export function report(r: LintResult): Report {
   return { conclusion: first ? "failure" : "success", title, summary: md.join("\n"), lines };
 }
 
-/** The knowledge-base mode's report. Its titles say `knowledge-base`, which the merge edge reads (§3.5). */
+/**
+ * The knowledge-base mode's report. Its titles say `knowledge-base`, which the merge edge reads
+ * (§3.5); a finding's report ends with the machine-read `Discovery-Review:` line (§3.6), in the
+ * check's summary and on stdout alike.
+ */
 export function reportKb(r: KbLintResult): Report {
   const last = r.rulesRun[r.rulesRun.length - 1];
   const ran = r.rulesRun.length === 2 ? r.rulesRun.join(", ") : `${r.rulesRun[0]}–${last}`;
@@ -98,6 +105,10 @@ export function reportKb(r: KbLintResult): Report {
   const md = [`**plan-lint** · \`${r.target}\` · knowledge-base mode · ${what} · ${ran}`, "", first ? `**FAIL — ${fmt(first)}**` : "**PASS**"];
   if (r.failures.length > 1) md.push("", "Every finding, in rule order:", "", ...r.failures.map((f) => `- ${fmt(f)}`));
   if (r.notes.length > 0) md.push("", "Notes:", "", ...r.notes.map((n) => `- ${n}`));
+  if (r.review !== null) {
+    lines.push(discoveryReviewLine(r.review));
+    md.push("", discoveryReviewLine(r.review));
+  }
   const title = !first ? `PASS — knowledge-base — ${r.target}`
     : first.couldNotRun ? `plan-lint could not run — ${first.rule} (${K_RULE_NAMES[first.rule]}) — ${r.target}`
     : `FAIL — ${first.rule} (${K_RULE_NAMES[first.rule]}) — knowledge-base — ${r.target}`;
@@ -133,7 +144,7 @@ export function writeGenerated(src: PlanSource, dir: string): boolean {
     const text = src.files.get(file);
     const split = text === undefined ? null : splitFrontmatter(text);
     const parsed = split && split.ok ? parseFrontmatter(split.frontmatter) : null;
-    const view = parsed && parsed.ok ? taskView(parsed.value) : null;
+    const view = parsed && parsed.ok ? planTaskView(parsed.value) : null;
     if (!view) throw new UsageError(`--write cannot render ${file}: its frontmatter lacks id, title, repo, commitClass or a well-formed dependsOn (rule 2)`);
     views.push(view);
   }
@@ -159,7 +170,7 @@ const USAGE = `usage:
   plan-lint --kb <findings-dir | assessment.md> [--offline] [--base <ref> | --no-base] [--task TASK-<n>]
   plan-lint --ic <integration-check/<YYYY>/<MM>/<DD>/<milestone>> [--offline] [--base <ref> | --no-base] [--task TASK-<n>]
 options: --summary-file <path>  --check-output <path>
-env: ALISSA_API_TOKEN (rules 10–12, K6–K7, I3 and I9), ALISSA_BASE (default ${DEFAULT_ALISSA_BASE}),
+env: ALISSA_API_TOKEN (rules 10–12, K6–K8, I3 and I9), ALISSA_BASE (default ${DEFAULT_ALISSA_BASE}),
      GITHUB_HEAD_REF (the PR's TASK-<n>-… branch, when --task is not given),
      GITHUB_TOKEN or GH_TOKEN (rule 5b, optional), GITHUB_API_URL (default ${DEFAULT_GITHUB_API})`;
 
@@ -249,13 +260,14 @@ function readerFor(offline: boolean, env: NodeJS.ProcessEnv): Parameters<typeof 
   return { online: true, reader: httpReader({ base: env.ALISSA_BASE || DEFAULT_ALISSA_BASE, token }), github: githubReader(env) };
 }
 
-/** The knowledge-base mode's online half: K6 (and an assessment's task) through the reader, K7 through the verify route. */
+/** The knowledge-base mode's online half: K6 (and an assessment's task) through the reader, K7 and K8 through Studio's verify routes. */
 function kbOptionsFor(offline: boolean, env: NodeJS.ProcessEnv, prTask: string | null): KbLintOptions {
   if (offline) return { online: false, prTask };
   const token = env.ALISSA_API_TOKEN;
-  if (!token) throw new UsageError("K6–K7 need ALISSA_API_TOKEN; pass --offline to run K1–K5 only");
+  if (!token) throw new UsageError("K6–K8 need ALISSA_API_TOKEN; pass --offline to run K1–K5 only");
   const base = env.ALISSA_BASE || DEFAULT_ALISSA_BASE;
-  return { online: true, reader: httpReader({ base, token }), verifier: httpPoster({ base, token }), prTask };
+  // K8's route fetches every page (and its archive) behind a 10 s per-fetch guard before it answers.
+  return { online: true, reader: httpReader({ base, token }), verifier: httpPoster({ base, token, timeoutMs: KB_VERIFY_TIMEOUT_MS }), prTask };
 }
 
 /** The integration-check mode's online half: I3 (the milestone's criteria) and I9 (the task) through the reader. */

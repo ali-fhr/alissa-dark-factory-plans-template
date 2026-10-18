@@ -1,6 +1,6 @@
 // A read-only Alissa REST client for rules 10–12 (design §5.5) and K6. GET only; the token is sent
-// as a Bearer header and never printed. Answers are memoised per path for the run. K7's one POST —
-// Studio's verify route, a read that takes its question as a body — goes through `httpPoster`.
+// as a Bearer header and never printed. Answers are memoised per path for the run. K7's and K8's
+// POSTs — Studio's verify routes, reads that take their question as a body — go through `httpPoster`.
 
 export interface Answer {
   status: number;
@@ -25,7 +25,7 @@ export interface HttpOptions {
   retryDelayMs?: number;
 }
 
-/** A POST whose answer is a read: Studio's `POST /v1/factory/repo-files/verify` (K7). */
+/** A POST whose answer is a read: Studio's `POST /v1/factory/repo-files/verify` (K7) and `POST /v1/factory/url-cites/verify` (K8). */
 export interface AlissaPoster {
   post(path: string, body: unknown): Promise<Answer>;
 }
@@ -90,7 +90,7 @@ export function httpReader(opts: HttpOptions): AlissaReader {
   };
 }
 
-/** No memo: K7 posts once per run. */
+/** No memo: K7 and K8 each post once per run. */
 export function httpPoster(opts: HttpOptions): AlissaPoster {
   const once = requester(opts);
   return { post: (path, body) => once("POST", path, body) };

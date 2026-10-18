@@ -38,11 +38,18 @@ export const KB_SHA = "3f9c2a1e5b7d4c6e8f0a1b2c3d4e5f60718293a4";
 export const KB_CREATED = Date.UTC(2026, 9, 14, 9, 30);
 
 export interface KbWorld {
-  /** `TASK-<n>` → what `GET /v1/tasks/:id?view=full` answers; `reads` becomes the Alissa-Reads trailer. */
-  tasks: Record<string, { kind: string; createdAt: number; reads?: string }>;
+  /**
+   * `TASK-<n>` → what `GET /v1/tasks/:id?view=full` answers; `reads` becomes the Alissa-Reads trailer
+   * (`none` included), `sources` the Alissa-Sources trailer and `asker` the Alissa-Asker trailer.
+   */
+  tasks: Record<string, { kind: string; createdAt: number; reads?: string; sources?: string; asker?: string; ownerId?: string }>;
   /** `<repo>@<sha>:<path>` → the blob and line count Studio's verify route reads there. */
   files: Record<string, { blob: string; lines: number }>;
+  /** A URL → how the page answers Studio's guarded fetch (K8): a status and its visible text, a timeout, or the guard's refusal. */
+  pages?: Record<string, { status: number; text?: string } | "timeout" | "guard">;
 }
+
+export const KB_OWNER = "j57owner000000000000000000000001";
 
 export function kbWorld(): KbWorld {
   const discovery = { kind: "discovery", createdAt: KB_CREATED, reads: `example-org/service-b@${KB_SHA}` };
@@ -51,13 +58,28 @@ export function kbWorld(): KbWorld {
   tasks["TASK-1306"] = { ...discovery, kind: "code" };
   tasks["TASK-2000"] = { kind: "design", createdAt: KB_CREATED };
   tasks["TASK-2001"] = { kind: "code", createdAt: KB_CREATED };
+  // v1.1: the web golden is an ask from TASK-1200 that reads code and pages; each K8 case reads pages only.
+  tasks["TASK-1200"] = { kind: "code", createdAt: KB_CREATED };
+  tasks["TASK-1240"] = { ...discovery, sources: "both", asker: "TASK-1200" };
+  for (const n of [1801, 1802, 1803, 1804, 1805]) tasks[`TASK-${n}`] = { kind: "discovery", createdAt: KB_CREATED, reads: "none", sources: "web" };
   const at = (path: string) => `example-org/service-b@${KB_SHA}:${path}`;
+  const docs = "Failed deliveries are retried with exponential backoff for up to three days. After that the event is dropped.";
   return {
     tasks,
     files: {
       [at("src/config/load.ts")]: { blob: "9ad0c1e2f3a4b5c6d7e8f90a1b2c3d4e5f6a7b8c", lines: 900 },
       [at("src/config/keys.ts")]: { blob: "51be2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c", lines: 64 },
       [at("config/.env.production")]: { blob: "9ad0c1e2f3a4b5c6d7e8f90a1b2c3d4e5f6a7b8c", lines: 900 },
+    },
+    pages: {
+      "https://docs.example.com/webhooks/retries": { status: 200, text: `Webhooks\n\n${docs}` },
+      "https://status.example.com/history": { status: 200, text: "Incident history. Webhook delivery was degraded for 41 minutes on 2026-09-30." },
+      "https://docs.example.com/limits": { status: 200, text: "Rate limits. Each account may send 100 requests per second." },
+      "https://docs.example.com/removed-page": { status: 404, text: "Not found" },
+      "https://docs.example.com/members-only": { status: 403, text: "Sign in to continue" },
+      "https://docs.example.com/flaky": { status: 503 },
+      "https://docs.example.com/changed": { status: 200, text: "This page has moved on: retries now follow the new policy." },
+      "https://web.archive.org/web/20261014100230/https://docs.example.com/changed": { status: 200, text: docs },
     },
   };
 }
@@ -72,6 +94,10 @@ export interface FakeAlissa {
   verify: "up" | "bad-shape" | number;
   /** The bodies K7 posted. */
   verifyBodies: unknown[];
+  /** How the url-cites route answers (K8): `up`, an HTTP status, or an answer of the wrong shape. */
+  urlVerify: "up" | "bad-shape" | number;
+  /** The bodies K8 posted. */
+  urlVerifyBodies: unknown[];
   requests: string[];
   close(): Promise<void>;
 }
@@ -87,6 +113,39 @@ function fakeVerify(kb: KbWorld, body: unknown): { status: number; body: unknown
     const end = Number(f.lines.split("-").pop());
     if (end > file.lines) return { ok: false, reason: "lines_out_of_range", detail: `the file has ${file.lines} lines` };
     return { ok: true };
+  });
+  return { status: 200, body: { results } };
+}
+
+/**
+ * Studio's `POST /v1/factory/url-cites/verify` (lane DS-11), modelled on its verify core: the live
+ * page, then the archive, each `holds`, `missing` (it answered without the quote), `gone`, `blocked`
+ * or `unavailable`; the verdict is §3.4's. The match folds case and whitespace only.
+ */
+function fakeUrlVerify(kb: KbWorld, body: unknown): { status: number; body: unknown } {
+  const cites = (body as { cites?: unknown } | null)?.cites;
+  if (!Array.isArray(cites)) return { status: 400, body: { error: "Bad Request", message: "cites is required" } };
+  const norm = (s: string): string => s.replace(/\s+/g, " ").trim().toLowerCase();
+  const copy = (url: string, quote: string): { kind: string; guard?: boolean } => {
+    const page = kb.pages?.[url];
+    if (page === "guard") return { kind: "blocked", guard: true };
+    if (page === "timeout") return { kind: "unavailable" };
+    const status = page?.status ?? 404;
+    if (status >= 500) return { kind: "unavailable" };
+    if (status === 404 || status === 410) return { kind: "gone" };
+    if (status >= 400) return { kind: "blocked" };
+    return { kind: norm(page?.text ?? "").includes(norm(quote)) ? "holds" : "missing" };
+  };
+  const results = cites.map((c: { url: string; quote: string; archive?: string }) => {
+    const live = copy(c.url, c.quote);
+    if (live.kind === "holds") return { verdict: "holds" };
+    const archive = c.archive === undefined ? null : copy(c.archive, c.quote);
+    if (archive?.kind === "holds") return { verdict: "archived", archive: c.archive, detail: "the live page does not hold the quote; the archive does" };
+    const copies = archive ? [live, archive] : [live];
+    if (copies.some((x) => x.kind === "unavailable")) return { verdict: "unavailable", detail: `${c.url} answered 503` };
+    if (copies.some((x) => x.kind === "missing")) return { verdict: "refuted", detail: "the quote is in neither copy" };
+    if (live.kind === "gone" && archive === null) return { verdict: "gone", detail: `${c.url} answered 404` };
+    return { verdict: "blocked", ...(copies.some((x) => x.guard) ? { guard: "fetchGuard" } : {}), detail: `${c.url} answered 403` };
   });
   return { status: 200, body: { results } };
 }
@@ -125,6 +184,25 @@ export async function fakeAlissa(world: World = loadWorld(), kb: KbWorld = kbWor
       return send(out.status, out.body);
     }
     if (req.headers.authorization !== `Bearer ${TOKEN}`) return send(401, { error: "Unauthorized", message: "Invalid or missing token." });
+    if (req.method === "POST" && url.pathname === "/v1/factory/url-cites/verify") {
+      let raw = "";
+      req.on("data", (d) => (raw += d));
+      req.on("end", () => {
+        let parsed: unknown = null;
+        try {
+          parsed = JSON.parse(raw);
+        } catch {
+          parsed = null;
+        }
+        api?.urlVerifyBodies.push(parsed);
+        const mode = api?.urlVerify ?? "up";
+        if (typeof mode === "number") return send(mode, { error: "Unavailable", message: "The url-cites route is down." });
+        if (mode === "bad-shape") return send(200, { results: [{ ok: true }] });
+        const out = fakeUrlVerify(kb, parsed);
+        send(out.status, out.body);
+      });
+      return;
+    }
     if (req.method === "POST" && url.pathname === "/v1/factory/repo-files/verify") {
       let raw = "";
       req.on("data", (d) => (raw += d));
@@ -149,8 +227,10 @@ export async function fakeAlissa(world: World = loadWorld(), kb: KbWorld = kbWor
     if (seg[0] === "v1" && seg[1] === "tasks" && seg.length === 3 && kb.tasks[seg[2] as string]) {
       const k = kb.tasks[seg[2] as string] as KbWorld["tasks"][string];
       const full = url.searchParams.get("view") === "full";
-      const description = `A discovery task of the fixtures.\n\nAlissa-Kind: ${k.kind}\n${k.reads ? `Alissa-Reads: ${k.reads}\n` : ""}Autonomous-Dev: example-org/plans`;
-      return send(200, { task: { taskNumber: Number((seg[2] as string).slice(5)), status: "in_progress", kind: k.kind, createdAt: k.createdAt, ...(full ? { description } : {}) } });
+      const trailers = [`Alissa-Kind: ${k.kind}`, ...(k.reads ? [`Alissa-Reads: ${k.reads}`] : []), ...(k.sources ? [`Alissa-Sources: ${k.sources}`] : []), ...(k.asker ? [`Alissa-Asker: ${k.asker}`] : [])];
+      const description = `A discovery task of the fixtures.\n\n${trailers.join("\n")}\nAutonomous-Dev: example-org/plans`;
+      const task = { taskNumber: Number((seg[2] as string).slice(5)), status: "in_progress", kind: k.kind, createdAt: k.createdAt, ownerId: k.ownerId ?? KB_OWNER };
+      return send(200, { task: { ...task, ...(full ? { description } : {}) } });
     }
     if (seg[0] !== "v1") return send(404, { error: "Not Found", message: "The requested endpoint does not exist." });
     if (seg[1] === "projects" && seg.length === 3) {
@@ -188,6 +268,8 @@ export async function fakeAlissa(world: World = loadWorld(), kb: KbWorld = kbWor
     kb,
     verify: "up",
     verifyBodies: [],
+    urlVerify: "up",
+    urlVerifyBodies: [],
     requests,
     close: () => new Promise<void>((r) => server.close(() => r())),
   };
