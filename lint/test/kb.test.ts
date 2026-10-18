@@ -3,15 +3,26 @@
 // of plans/ and knowledge-base/ is refused by K1; c4 K7 with the verify route down reports "plan-lint
 // could not run", a failure; the review's (a) a design task's one assessment is admitted, (b) the
 // inlined deny-list, (c) K6's creation-day check.
+//
+// Findings v1.1 (design §2.2, §2.5, §3.4, §3.6, §4.6, lane DS-10): c1 every v1 fixture still passes
+// byte-for-byte; c2 one fixture per K8 verdict (`refuted`, `gone`, `blocked`, `unavailable` → could
+// not run) fails exactly K8, and an `archived` one passes; c3 a URL cite on a task without
+// `Alissa-Sources: web | both` fails K6; c4 the `Discovery-Review:` line; c5 the stamp; c6 `project
+// | bodyOfWork` is a `oneOf`.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { reportKb } from "../plan-lint.ts";
-import { KB_DENY_PATTERNS, KB_TOKEN_SHAPE_SOURCES, type KRule, K_RULE_NAMES, isDeniedPath, lintKb, secretShapedLines, taskOfBranch } from "../rules.ts";
+import {
+  KB_ARCHIVE_HOSTS, KB_DENY_PATTERNS, KB_TOKEN_SHAPE_SOURCES, type KRule, K_RULE_NAMES, discoveryReviewLine, findingsSchema, isDeniedPath, lintKb, secretShapedLines,
+  taskOfBranch,
+} from "../rules.ts";
+import { parseFrontmatter, splitFrontmatter } from "../markdown.ts";
 import { readKbDir } from "../source.ts";
 import {
-  type FakeAlissa, KB_CREATED, TOKEN, caseNames, cliEnv, commitAll, fakeAlissa, fixturePlan, git, initRepo, kbFixture, kbOnlineAgainst, runCli, tempDir,
+  type FakeAlissa, KB_CREATED, KB_SHA, TOKEN, caseNames, cliEnv, commitAll, fakeAlissa, fixturePlan, git, initRepo, kbFixture, kbOnlineAgainst, runCli, tempDir,
 } from "./helpers.ts";
 
 let api: FakeAlissa;
@@ -22,9 +33,10 @@ after(async () => {
   await api.close();
 });
 
-const kbCases = caseNames().filter((n) => /^kb-k\d-/.test(n));
+/** One fixture per K rule, each failing exactly its rule; `kb-k8-archived` is K8's passing case. */
+const kbCases = caseNames().filter((n) => /^kb-k\d-/.test(n) && n !== "kb-k8-archived");
 const ruleOf = (name: string): KRule => {
-  const m = /^kb-(k[1-7])-[a-z0-9-]+$/.exec(name);
+  const m = /^kb-(k[1-8])-[a-z0-9-]+$/.exec(name);
   assert.ok(m, `fixture case \`${name}\` is named kb-k<n>-<what>`);
   return (m[1] as string).toUpperCase() as KRule;
 };
@@ -53,29 +65,43 @@ function kbPr(caseName: string, opts: { onBase?: boolean; plan?: boolean; also?:
   return { repo, base, head: commitAll(repo, "pr") };
 }
 
+/** A findings file's frontmatter, parsed as the linter parses it. */
+const yamlOf = (text: string): unknown => {
+  const split = splitFrontmatter(text);
+  assert.ok(split.ok);
+  const parsed = parseFrontmatter(split.frontmatter);
+  assert.ok(parsed.ok);
+  return parsed.value;
+};
+
 const prArgs = (pr: { repo: string; base: string; head: string }, extra: string[] = []) => ["--pr", "--repo", pr.repo, "--base", pr.base, "--head", pr.head, ...extra];
 
 describe("knowledge-base fixtures (c2)", () => {
-  it("has the golden finding, the assessment and exactly one fixture per K rule", () => {
-    assert.deepEqual(kbCases.map(ruleOf), ["K1", "K2", "K3", "K4", "K5", "K6", "K7"]);
-    assert.ok(caseNames().includes("kb-golden"));
-    assert.ok(caseNames().includes("kb-assessment"));
+  it("has the golden findings, the assessment, one fixture per K rule and one per failing K8 verdict", () => {
+    assert.deepEqual(kbCases.map(ruleOf), ["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K8", "K8", "K8"]);
+    assert.deepEqual(kbCases.filter((n) => n.startsWith("kb-k8-")), ["kb-k8-blocked", "kb-k8-gone", "kb-k8-refuted", "kb-k8-unavailable"]);
+    for (const n of ["kb-golden", "kb-golden-web", "kb-assessment", "kb-k8-archived"]) assert.ok(caseNames().includes(n), n);
   });
 
-  it("the golden finding passes K1–K7", async () => {
-    const r = await lintCase("kb-golden");
-    assert.deepEqual(r.failures, []);
-    assert.deepEqual(r.rulesRun, ["K1", "K2", "K3", "K4", "K5", "K6", "K7"]);
-    assert.equal(r.questionCount, 2);
-  });
+  for (const name of ["kb-golden", "kb-golden-web"]) {
+    it(`${name} passes K1–K8`, async () => {
+      const r = await lintCase(name);
+      assert.deepEqual(r.failures, []);
+      assert.deepEqual(r.rulesRun, ["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8"]);
+      assert.equal(r.questionCount, 2);
+    });
+  }
 
   for (const name of kbCases) {
     const rule = ruleOf(name);
+    // `unavailable` is K8's "could not run": a failure, never a pass, and never a refusal of the finding.
+    const couldNotRun = name === "kb-k8-unavailable";
     it(`${name} fails ${rule} (${K_RULE_NAMES[rule]}) and no other rule`, async () => {
       const r = await lintCase(name);
       assert.ok(r.failures.length > 0, "expected a failure");
       assert.deepEqual([...new Set(r.failures.map((f) => f.rule))], [rule], JSON.stringify(r.failures, null, 2));
-      assert.ok(r.failures.every((f) => !f.couldNotRun), "a refusal, not a run that could not happen");
+      if (couldNotRun) assert.ok(r.failures.every((f) => f.couldNotRun === true), "a run that could not happen");
+      else assert.ok(r.failures.every((f) => !f.couldNotRun), "a refusal, not a run that could not happen");
     });
 
     it(`${name}: the CLI exits 1 and the verdict names ${rule}`, async () => {
@@ -95,21 +121,25 @@ describe("knowledge-base fixtures (c2)", () => {
     assert.match(await messages("kb-k5-hygiene"), /`config\/\.env\.production`, a deny-listed path/);
     assert.match(await messages("kb-k6-task"), /`TASK-1306` is `kind: code`, not `discovery`/);
     assert.match(await messages("kb-k7-cites"), /cite `example-org\/service-b:src\/config\/load\.ts#L1-40` has a different blob at the pinned SHA/);
+    assert.match(await messages("kb-k8-refuted"), /^URL cite `https:\/\/docs\.example\.com\/limits` is refuted: the page answers, and neither it nor an archive holds the quote/);
+    assert.match(await messages("kb-k8-gone"), /^URL cite `https:\/\/docs\.example\.com\/removed-page` is gone \(404 or 410\), and no archive holds the quote/);
+    assert.match(await messages("kb-k8-blocked"), /^URL cite `https:\/\/docs\.example\.com\/members-only` is blocked — .*; supply an archive or another source/);
+    assert.match(await messages("kb-k8-unavailable"), /^plan-lint could not run: URL cite `https:\/\/docs\.example\.com\/flaky` is unavailable \(a 5xx or a timeout\)/);
   });
 
-  it("offline runs K1–K5 only; the K6 and K7 fixtures pass them", async () => {
-    for (const name of ["kb-golden", "kb-k6-task", "kb-k7-cites"]) {
+  it("offline runs K1–K5 only; the K6, K7 and K8 fixtures pass them", async () => {
+    for (const name of ["kb-golden", "kb-golden-web", "kb-k6-task", "kb-k7-cites", "kb-k8-refuted", "kb-k8-gone", "kb-k8-blocked", "kb-k8-unavailable", "kb-k8-archived"]) {
       const run = await runCli(["--kb", kbFixture(name), "--no-base", "--offline"]);
       assert.equal(run.status, 0, run.stdout + run.stderr);
-      assert.match(run.stdout, /knowledge-base mode — 2 question\(s\) — K1–K5$/m);
-      assert.match(run.stdout, /K6–K7 not run \(offline\)/);
+      assert.match(run.stdout, /knowledge-base mode — [12] question\(s\) — K1–K5$/m);
+      assert.match(run.stdout, /K6–K8 not run \(offline\)/);
     }
   });
 
-  it("online without ALISSA_API_TOKEN it refuses to run rather than skip K6–K7", async () => {
+  it("online without ALISSA_API_TOKEN it refuses to run rather than skip K6–K8", async () => {
     const run = await runCli(["--kb", kbFixture("kb-golden"), "--no-base"]);
     assert.equal(run.status, 2);
-    assert.match(run.stderr, /K6–K7 need ALISSA_API_TOKEN/);
+    assert.match(run.stderr, /K6–K8 need ALISSA_API_TOKEN/);
   });
 });
 
@@ -159,10 +189,13 @@ describe("K7 through Studio's verify route (c4)", () => {
       .replace("status: answered", "status: partial")
       .replace(/risks:\n(?:.*\n)*?suggestedTasks:/, "suggestedTasks:");
     writeFileSync(join(dir, "findings.md"), noCites);
+    api.urlVerifyBodies.length = 0;
     const r = await lintKb(readKbDir(dir, null), kbOnlineAgainst(api));
     assert.deepEqual(r.failures, []);
     assert.equal(api.verifyBodies.length, 0);
-    assert.ok(r.notes.includes("K7: the findings cite nothing"));
+    assert.equal(api.urlVerifyBodies.length, 0);
+    assert.ok(r.notes.includes("K7: the findings cite no repository file"));
+    assert.ok(r.notes.includes("K8: the findings cite no page"));
   });
 });
 
@@ -173,7 +206,7 @@ describe("--pr in the knowledge-base mode (c1, c3)", () => {
     const run = await runCli(prArgs(pr, ["--check-output", out]), cliEnv(api));
     assert.equal(run.status, 0, run.stdout + run.stderr);
     assert.doesNotMatch(run.stdout, /nothing to lint/);
-    assert.match(run.stdout, /^plan-lint: knowledge-base\/2026\/10\/14\/TASK-1234 — knowledge-base mode — 2 question\(s\) — K1–K7$/m);
+    assert.match(run.stdout, /^plan-lint: knowledge-base\/2026\/10\/14\/TASK-1234 — knowledge-base mode — 2 question\(s\) — K1–K8$/m);
     const check = JSON.parse(readFileSync(out, "utf8")) as { conclusion: string; title: string };
     assert.deepEqual(check, { ...check, conclusion: "success", title: "PASS — knowledge-base — knowledge-base/2026/10/14/TASK-1234" });
   });
@@ -412,6 +445,292 @@ describe("schema v1.2 in a plan", () => {
   });
 });
 
+describe("findings v1.1 — the URL cite, K8 and the review line (DS-10)", () => {
+  const webGolden = () => readFileSync(join(kbFixture("kb-golden-web"), "findings.md"), "utf8");
+  const golden = () => readFileSync(join(kbFixture("kb-golden"), "findings.md"), "utf8");
+  /** A variant of a fixture's findings, written under its own task's directory. */
+  const variantDir = (text: string, task: string): string => {
+    const dir = join(tempDir("kb-v11"), "knowledge-base", "2026", "10", "14", task);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "findings.md"), text);
+    return dir;
+  };
+  const offline = async (text: string, task = "TASK-1240") => (await lintKb(readKbDir(variantDir(text, task), null), { online: false })).failures;
+  const online = async (text: string, task = "TASK-1240") => lintKb(readKbDir(variantDir(text, task), null), kbOnlineAgainst(api));
+  const rulesOf = (f: Array<{ rule: string }>) => [...new Set(f.map((x) => x.rule))];
+  const said = (f: Array<{ rule: string; message: string }>) => f.map((x) => `${x.rule} ${x.message}`).join("\n");
+  const withTask = async <T>(task: string, patch: Partial<FakeAlissa["kb"]["tasks"][string]>, run: () => Promise<T>): Promise<T> => {
+    const saved = api.kb.tasks[task];
+    api.kb.tasks[task] = { ...(saved as FakeAlissa["kb"]["tasks"][string]), ...patch };
+    try {
+      return await run();
+    } finally {
+      api.kb.tasks[task] = saved as FakeAlissa["kb"]["tasks"][string];
+    }
+  };
+
+  it("c1: every v1 fixture is byte-for-byte the one v1's linter shipped, and still lints as before", async () => {
+    const pinned: Record<string, string> = {
+      "kb-golden": "ad1803d675780a8ac626e753e31604660df4fc40b23bc34fb1e783186635eaa7",
+      "kb-k1-layout": "e0336708ed6e9ad1eca805771fe7e9b5507ba25d587d0fb59aa22829abaec580",
+      "kb-k2-frontmatter": "b5d79042ee3d7727b963221e3bd0eada7098e0c1aee73bf60f06615eed8964d7",
+      "kb-k3-completeness": "6795ea5cce934003919b2b585d00ccaba87208bd6d3b187eea5db811376efb81",
+      "kb-k4-size": "f980f2d214e71cf63a0fb5f52f66ff2194248e42a90d24c4d6e52d2803b57393",
+      "kb-k5-hygiene": "821039311856b1c266a691be2a1c3b3cfd36d0dd2768da185e2ee874e47db891",
+      "kb-k6-task": "ff53fa94f545a963d6f5c85ce7dfafd278afa9b40ddbc43b5845d7429de75e88",
+      "kb-k7-cites": "c259d945ab411142613f46a88912b5c54b1042c4adc9bf823324840577624eee",
+    };
+    for (const [name, sha] of Object.entries(pinned)) {
+      const text = readFileSync(join(kbFixture(name), "findings.md"));
+      assert.equal(createHash("sha256").update(text).digest("hex"), sha, `${name} is unchanged`);
+      assert.match(text.toString("utf8"), /^schema: alissa-findings\/v1$/m, `${name} is a v1 file`);
+    }
+    // The golden passes and each K fixture fails exactly its rule — the suite above, run over these same bytes.
+    assert.deepEqual((await lintCase("kb-golden")).failures, []);
+  });
+
+  it("c2: the archived verdict passes, says so, and the projection's stale reading is named", async () => {
+    const r = await lintCase("kb-k8-archived");
+    assert.deepEqual(r.failures, []);
+    assert.ok(r.notes.some((n) => /^K8: URL cite `https:\/\/docs\.example\.com\/changed` holds only in its archive `https:\/\/web\.archive\.org\/web\/20261014100230\/.*` — it passes, and the projection marks it stale/.test(n)), r.notes.join("\n"));
+  });
+
+  it("c2: each verdict's fixture fails K8 through the CLI, and unavailable reads 'plan-lint could not run'", async () => {
+    for (const [name, title] of [
+      ["kb-k8-refuted", /^FAIL — K8 \(external cites hold\) — knowledge-base — /],
+      ["kb-k8-gone", /^FAIL — K8 \(external cites hold\) — knowledge-base — /],
+      ["kb-k8-blocked", /^FAIL — K8 \(external cites hold\) — knowledge-base — /],
+      ["kb-k8-unavailable", /^plan-lint could not run — K8 \(external cites hold\) — /],
+    ] as const) {
+      const out = join(tempDir("kb-k8"), "check.json");
+      const run = await runCli(["--kb", kbFixture(name), "--no-base", "--check-output", out], cliEnv(api));
+      assert.equal(run.status, 1, run.stdout + run.stderr);
+      const check = JSON.parse(readFileSync(out, "utf8")) as { conclusion: string; title: string };
+      assert.equal(check.conclusion, "failure");
+      assert.match(check.title, title, name);
+    }
+    const run = await runCli(["--kb", kbFixture("kb-k8-archived"), "--no-base"], cliEnv(api));
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+  });
+
+  it("K8 posts each distinct URL cite once — url, quote and archive, never retrievedAt — and repo cites go to K7 alone", async () => {
+    api.verifyBodies.length = 0;
+    api.urlVerifyBodies.length = 0;
+    assert.deepEqual((await lintCase("kb-golden-web")).failures, []);
+    assert.equal(api.urlVerifyBodies.length, 1);
+    const cites = (api.urlVerifyBodies[0] as { cites: Array<Record<string, string>> }).cites;
+    assert.deepEqual(cites.map((c) => Object.keys(c).sort()), [["archive", "quote", "url"], ["quote", "url"]]);
+    assert.deepEqual(cites.map((c) => c.url), ["https://docs.example.com/webhooks/retries", "https://status.example.com/history"]);
+    const files = (api.verifyBodies[0] as { files: Array<Record<string, string>> }).files;
+    assert.deepEqual(files.map((f) => f.path), ["src/config/load.ts"]);
+    api.urlVerifyBodies.length = 0;
+    await lintCase("kb-golden");
+    assert.equal(api.urlVerifyBodies.length, 0, "a repo-only finding posts no URL cite");
+  });
+
+  for (const [mode, why] of [[503, /answered 503/], [404, /answered 404/], ["bad-shape", /unexpected shape/]] as const) {
+    it(`K8's route ${mode}: "plan-lint could not run", a failure and never a pass`, async () => {
+      api.urlVerify = mode;
+      try {
+        const r = await lintCase("kb-golden-web");
+        assert.deepEqual(r.failures.map((f) => [f.rule, f.couldNotRun]), [["K8", true]]);
+        assert.match(r.failures[0]?.message ?? "", why);
+        assert.match(reportKb(r).title, /^plan-lint could not run — K8 \(external cites hold\) — /);
+      } finally {
+        api.urlVerify = "up";
+      }
+    });
+  }
+
+  it("c3: a URL cite on a task without Alissa-Sources: web | both fails K6, and only K6", async () => {
+    for (const sources of [undefined, "code"]) {
+      const r = await withTask("TASK-1240", { sources }, () => lintCase("kb-golden-web"));
+      assert.deepEqual(rulesOf(r.failures), ["K6"], said(r.failures));
+      assert.match(said(r.failures), /the findings carry 2 URL cite\(s\), but `TASK-1240` reads `sources: code` \(no `Alissa-Sources: web` or `both`\)/);
+    }
+    const r = await withTask("TASK-1240", { sources: "pages" }, () => lintCase("kb-golden-web"));
+    assert.match(said(r.failures), /^K6 `TASK-1240` carries `Alissa-Sources: pages` — it is `code`, `web` or `both`/);
+    assert.deepEqual((await withTask("TASK-1240", { sources: "web" }, () => lintCase("kb-golden-web"))).failures, []);
+  });
+
+  it("K6: Alissa-Reads: none matches an empty reads, and refuses a finding that names a read", async () => {
+    assert.deepEqual((await lintCase("kb-k8-archived")).failures, [], "TASK-1805 carries Alissa-Reads: none and reads: []");
+    const r = await withTask("TASK-1240", { reads: "none" }, () => lintCase("kb-golden-web"));
+    assert.deepEqual(rulesOf(r.failures), ["K6"]);
+    assert.match(said(r.failures), /carries `Alissa-Reads: none`, but `reads` names `example-org\/service-b`/);
+  });
+
+  it("K6: an ask's asker resolves to a task of the same owner, and agrees with the task's Alissa-Asker", async () => {
+    let r = await withTask("TASK-1200", { ownerId: "j57someoneelse000000000000000001" }, () => lintCase("kb-golden-web"));
+    assert.match(said(r.failures), /^K6 the asker `TASK-1200` belongs to another owner than `TASK-1240` — an ask never crosses owners/);
+    r = await online(webGolden().replace("asker: TASK-1200", "asker: TASK-4041"));
+    assert.match(said(r.failures), /the asker `TASK-4041` does not resolve/);
+    assert.match(said(r.failures), /was asked by `TASK-1200` \(its Alissa-Asker\), but the finding's `asker` is `TASK-4041`/);
+    r = await online(webGolden().replace("asker: TASK-1200\n", ""));
+    assert.deepEqual(rulesOf(r.failures), ["K6"]);
+    assert.match(said(r.failures), /the finding's `asker` is absent/);
+  });
+
+  it("c4: the review line — none for a repo-only finding below high impact, light naming its reasons otherwise", async () => {
+    const lineOf = async (text: string, task = "TASK-1234") => {
+      const r = await lintKb(readKbDir(variantDir(text, task), null), { online: false });
+      return r.review === null ? null : discoveryReviewLine(r.review);
+    };
+    const repoOnlyNoHigh = golden().replace("impact: high", "impact: medium");
+    assert.equal(await lineOf(repoOnlyNoHigh), "Discovery-Review: none");
+    // §3.6: a `high`-impact question gets the light round even when every cite is a repo cite (§12 Q11's DEFAULT).
+    assert.equal(await lineOf(golden()), "Discovery-Review: light — high impact: q1");
+    assert.equal(await lineOf(webGolden(), "TASK-1240"), "Discovery-Review: light — external cites: 2");
+    assert.equal(await lineOf(webGolden().replace("impact: low", "impact: high"), "TASK-1240"), "Discovery-Review: light — external cites: 2; high impact: q2");
+    // Findings too malformed to classify carry no line: a reader takes a missing line as light.
+    const r = await lintKb(readKbDir(variantDir("no frontmatter\n", "TASK-1234"), null), { online: false });
+    assert.equal(r.review, null);
+  });
+
+  it("c4: the CLI ends its output and the check summary with the review line; --pr does too", async () => {
+    const out = join(tempDir("kb-review"), "check.json");
+    let run = await runCli(["--kb", kbFixture("kb-golden-web"), "--no-base", "--offline", "--check-output", out]);
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.equal(run.stdout.trimEnd().split("\n").at(-1), "Discovery-Review: light — external cites: 2");
+    const check = JSON.parse(readFileSync(out, "utf8")) as { summary: string };
+    assert.equal(check.summary.split("\n").at(-1), "Discovery-Review: light — external cites: 2");
+    run = await runCli(prArgs(kbPr("kb-golden")), cliEnv(api));
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.equal(run.stdout.trimEnd().split("\n").at(-1), "Discovery-Review: light — high impact: q1");
+    run = await runCli(["--kb", kbFixture("kb-assessment"), "--no-base", "--offline"]);
+    assert.doesNotMatch(run.stdout, /Discovery-Review:/, "an assessment is not a finding");
+  });
+
+  it("c6: a finding carries exactly one of project and bodyOfWork — both, or neither, fails the schema", async () => {
+    const validate = findingsSchema();
+    const both = webGolden().replace("bodyOfWork: b57c0000000000000000000000000001", "bodyOfWork: b57c0000000000000000000000000001\nproject: j57c0000000000000000000000000001");
+    const neither = webGolden().replace("bodyOfWork: b57c0000000000000000000000000001\n", "");
+    for (const [text, why] of [[both, /carries both `project` and `bodyOfWork`/], [neither, /carries neither `project` nor `bodyOfWork`/]] as const) {
+      const f = await offline(text);
+      assert.deepEqual(f.map((x) => x.rule), ["K2"], said(f));
+      assert.match(said(f), why);
+    }
+    const fm = (text: string) => (yamlOf(text) as Record<string, unknown>);
+    assert.equal(validate(fm(both)), false);
+    assert.ok(validate.errors?.some((e) => e.keyword === "oneOf" && e.instancePath === ""));
+    assert.equal(validate(fm(neither)), false);
+    assert.equal(validate(fm(webGolden())), true, JSON.stringify(validate.errors));
+  });
+
+  it("a v1 file keeps v1's shape: a project, at least one read, no URL cite, no asker", async () => {
+    const v1 = (s: string) => s.replace("schema: alissa-findings/v1.1", "schema: alissa-findings/v1");
+    let f = await offline(v1(webGolden()));
+    assert.match(said(f), /\/questions\/0\/cites\/0 is a URL cite — it needs `schema: alissa-findings\/v1\.1`/);
+    assert.match(said(f), /\/bodyOfWork is not allowed|must have required property 'project'/);
+    f = await offline(golden().replace(/reads:\n.*\n.*\n/, "reads: []\n").replace(/ {4}cites:\n(?: {6}- .*\n)+/, "").replace("status: answered", "status: partial").replace(/risks:\n(?:.*\n)*?suggestedTasks:/, "suggestedTasks:"), "TASK-1234");
+    assert.match(said(f), /\/reads must NOT have fewer than 1 items/);
+  });
+
+  it("K2: the URL cite's shape — https, a real retrievedAt between the task's day and now, a verbatim quote, a trusted archive", async () => {
+    const cases: Array<[string, string, RegExp]> = [
+      ["url: https://docs.example.com/webhooks/retries", "url: http://docs.example.com/webhooks/retries", /\/url must match pattern/],
+      ['retrievedAt: "2026-10-14T10:02:11Z"', 'retrievedAt: "2026-02-30T10:02:11Z"', /`retrievedAt` `2026-02-30T10:02:11Z` is not a real RFC 3339 time in UTC/],
+      ['retrievedAt: "2026-10-14T10:02:11Z"', 'retrievedAt: "2026-10-13T23:59:59Z"', /is before the task's creation day, 2026-10-14/],
+      ['retrievedAt: "2026-10-14T10:02:11Z"', 'retrievedAt: "2999-01-01T00:00:00Z"', /`retrievedAt` `2999-01-01T00:00:00Z` is in the future/],
+      ['retrievedAt: "2026-10-14T10:02:11Z"', 'retrievedAt: "2026-10-14 10:02:11"', /\/retrievedAt must match pattern/],
+      ['quote: "Failed deliveries are retried with exponential backoff for up to three days."', 'quote: "Up to three days."', /\/quote must NOT have fewer than 20 characters/],
+      ["archive: https://web.archive.org/web/20261014100230/", "archive: https://mirror.example.net/20261014100230/", /is on mirror\.example\.net, which is not an archive host K8 trusts \(web\.archive\.org, archive\.ph\)/],
+      ["archive: https://web.archive.org/web/20261014100230/", "archive: https://web.archive.org/save/", /is not a web\.archive\.org capture/],
+      ["kind: url\n        url: https://docs", "kind: page\n        url: https://docs", /\/kind must be equal to constant/],
+    ];
+    for (const [from, to, why] of cases) {
+      const text = webGolden().replace(from, to);
+      assert.notEqual(text, webGolden(), from);
+      const f = await offline(text);
+      assert.deepEqual(rulesOf(f), ["K2"], `${to}\n${said(f)}`);
+      assert.match(said(f), why, to);
+    }
+    assert.deepEqual([...KB_ARCHIVE_HOSTS], ["web.archive.org", "archive.ph"]);
+    const source = readFileSync(new URL("../rules.ts", import.meta.url), "utf8");
+    assert.ok(source.includes("studio.alissa.app `convex/core/urlCites.ts`"), "the archive list names where it is copied from");
+  });
+
+  it("K2: a repo cite still names a read repository when reads is empty", async () => {
+    const f = await offline(webGolden().replace(/reads:\n.*\n.*\n/, "reads: []\n"));
+    assert.match(said(f), /^K2 a cite names `example-org\/service-b`, which is not in `reads`/);
+  });
+
+  it("K4: at most 48 URL cites across the file; K5: no credential in a URL or an archive", async () => {
+    const cite = (i: number) => `      - { kind: url, url: "https://docs.example.com/p${i}", retrievedAt: "2026-10-14T10:00:00Z", quote: "A sentence of twenty characters or more." }\n`;
+    const risk = (k: number) => `  - text: r${k}\n    severity: low\n    cites:\n${Array.from({ length: 17 }, (_, i) => cite(k * 100 + i)).join("")}`;
+    let f = await offline(webGolden().replace("risks:\n", `risks:\n${[1, 2, 3].map(risk).join("")}`));
+    assert.deepEqual(rulesOf(f), ["K4"], said(f));
+    assert.match(said(f), /carries 53 URL cites; at most 48, across questions and risks/);
+    for (const [from, to, why] of [
+      ["url: https://docs.example.com/webhooks/retries", "url: https://user:pw@docs.example.com/webhooks/retries", /a URL cite carries userinfo/],
+      ["url: https://docs.example.com/webhooks/retries", "url: https://docs.example.com/webhooks/retries?access_token=abc", /a URL cite carries a token-shaped query parameter \(`access_token`\)/],
+      ["/https://docs.example.com/webhooks/retries\n", `/https://docs.example.com/webhooks/retries?x=${"a1".repeat(24)}\n`, /an archive carries a token-shaped query parameter value/],
+    ] as const) {
+      f = await offline(webGolden().replace(from, to));
+      assert.deepEqual(rulesOf(f), ["K5"], `${to}\n${said(f)}`);
+      assert.match(said(f), why);
+      assert.doesNotMatch(said(f), /pw@|abc|a1a1a1/, "the credential itself is never printed");
+    }
+  });
+
+  it("K3: a question answered from a page alone is admitted", async () => {
+    assert.deepEqual((await lintCase("kb-k8-archived")).failures, []);
+  });
+});
+
+describe("schema v1.3 in a plan — sources, a web task's repo, an ask's milestone", () => {
+  const webTask = (edit: (s: string) => string = (s) => s): string => {
+    const dir = join(tempDir("web-plan"), "2026-09-28-golden-plan");
+    cpSync(fixturePlan("golden"), dir, { recursive: true });
+    const task = join(dir, "tasks", "config-contract-notes.md");
+    const fm = readFileSync(task, "utf8")
+      .replace("repo: example-org/service-a\n", "")
+      .replace("scope:\n  - docs/config/contract.md\n  - README.md\n", "kind: discovery\nquestions:\n  - { id: q1, text: Which config formats do comparable services document?, unblocks: [{ decision: Whether the notes need a format section, impact: medium }] }\n")
+      .replace("sources:\n  - drift:config-contract:2.0\n", "sources: web\n");
+    writeFileSync(task, edit(fm));
+    return dir;
+  };
+
+  it("a `sources: web` discovery task names no repo; --write renders it as `web`, and rules 1–12 and 5b pass", async () => {
+    const dir = webTask();
+    let run = await runCli(["--write", dir, "--no-base", "--offline"]);
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.match(readFileSync(join(dir, "plan.md"), "utf8"), /^- `config-contract-notes` — .* \(web, doc-correction\)$/m);
+    run = await runCli([dir, "--no-base"], cliEnv(api));
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.match(run.stdout, /^plan-lint: PASS$/m);
+  });
+
+  it("a discovery task reading code names its repo; `sources` takes code | web | both or source keys", async () => {
+    let run = await runCli([webTask((s) => s.replace("sources: web", "sources: code")), "--no-base", "--offline"]);
+    assert.equal(run.status, 1);
+    assert.match(run.stdout, /FAIL rule 2 \(frontmatter\) — tasks\/config-contract-notes\.md: frontmatter \(root\) must have required property 'repo'/);
+    run = await runCli([webTask((s) => s.replace("sources: web", "sources: pages")), "--no-base", "--offline"]);
+    assert.match(run.stdout, /rule 2 .*\/sources must be equal to one of the allowed values: code, web, both/);
+  });
+
+  it("`asker` lets a discovery task omit its milestone — admitted by the schema, refused in a plan by rule 10", async () => {
+    const dir = webTask((s) => s.replace("milestone: b0000000000000000000000000000001\n", "asker: TASK-101\n"));
+    let run = await runCli(["--write", dir, "--no-base", "--offline"]);
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    run = await runCli([dir, "--no-base"], cliEnv(api));
+    assert.equal(run.status, 1);
+    assert.match(run.stdout, /FAIL rule 10 \(anchor\) — tasks\/config-contract-notes\.md: the task names no `milestone` — schema v1\.3 omits it only on a project-less ask/);
+    run = await runCli([webTask((s) => s.replace("milestone: b0000000000000000000000000000001\n", "")), "--no-base", "--offline"]);
+    assert.match(run.stdout, /FAIL rule 2 .*must have required property 'milestone'/);
+  });
+
+  it("a code task carries neither `asker` nor a discovery `sources`", async () => {
+    const dir = join(tempDir("code-plan"), "2026-09-28-golden-plan");
+    cpSync(fixturePlan("golden"), dir, { recursive: true });
+    const task = join(dir, "tasks", "config-contract-notes.md");
+    writeFileSync(task, readFileSync(task, "utf8").replace("commitClass: doc-correction\n", "commitClass: doc-correction\nasker: TASK-101\n"));
+    const run = await runCli([dir, "--no-base", "--offline"]);
+    assert.equal(run.status, 1);
+    assert.match(run.stdout, /FAIL rule 2 .*\/asker is not allowed on this kind of task/);
+  });
+});
+
 describe("lint/VERSION — the stamp Studio's plans-repo-kb-lint readiness check reads (§12 Q2)", () => {
   const stamp = (): Record<string, string> => {
     const out: Record<string, string> = {};
@@ -430,8 +749,8 @@ describe("lint/VERSION — the stamp Studio's plans-repo-kb-lint readiness check
     assert.match(s["plan-lint-template"] ?? "", /^\d{4}-\d{2}-\d{2}$/);
     const task = JSON.parse(readFileSync(new URL("../../schema/task-frontmatter.v1.json", import.meta.url), "utf8")) as { title: string };
     assert.ok(task.title.endsWith(`version ${s["task-schema"]}`), task.title);
-    const findings = JSON.parse(readFileSync(new URL("../../schema/findings.v1.json", import.meta.url), "utf8")) as { properties: { schema: { const: string } } };
-    assert.equal(s["findings-schema"], findings.properties.schema.const);
+    const findings = JSON.parse(readFileSync(new URL("../../schema/findings.v1.json", import.meta.url), "utf8")) as { properties: { schema: { enum: string[] } } };
+    assert.equal(s["findings-schema"], findings.properties.schema.enum.at(-1), "the stamp names the newest findings schema the linter reads");
     assert.deepEqual((s["kb-rules"] ?? "").split(" "), Object.keys(K_RULE_NAMES));
     assert.ok(readFileSync(new URL("../rules.ts", import.meta.url), "utf8").includes(`REPO_CONTEXT_FILTER_VERSION \`${s["kb-deny-list"]}\``));
   });

@@ -270,14 +270,15 @@ pull request's own linter, package scripts and git drivers never run in the trus
 
 **The layout** of the tooling: `schema/` (the plan and task schemas, pinned by
 `lint/test/design.test.ts` against the design at a named commit: the plan schema byte-equal to
-§5.3, the task schema §5.3's bumped in place to **version 1.2** — v1.1's optional `kind`, optional
-`new[]` and edge type widened to `acceptance`; v1.2's `kind: discovery` branch — `$id` unchanged,
+§5.3, the task schema §5.3's bumped in place to **version 1.3** — v1.1's optional `kind`, optional
+`new[]` and edge type widened to `acceptance`; v1.2's `kind: discovery` branch; v1.3's discovery
+`sources`, and `repo` and `milestone` optional for a web task and an ask — `$id` unchanged,
 with nothing else changed; `findings.v1.json`, the knowledge base's; and `integration-check.v1.json`,
 an integration-check report's), `lint/` (the linter, its tests and the `VERSION` stamp), `fixtures/`
 (a golden plan that passes, at least one plan per rule failing exactly that rule — `rule-<nn>[b]-<what>`,
 one per schema v1.1 refusal and one for rule 5b — the Alissa and GitHub state the tests' fake APIs
-serve for rules 10–12 and 5b, the knowledge-base cases `kb-golden`, `kb-assessment` and one
-`kb-k<n>-<what>` per K rule, and under `fixtures/integration-check/` the run `ic-golden` and one
+serve for rules 10–12 and 5b, the knowledge-base cases `kb-golden`, `kb-golden-web`, `kb-assessment`,
+one `kb-k<n>-<what>` per K rule and one `kb-k8-<verdict>` per K8 verdict, and under `fixtures/integration-check/` the run `ic-golden` and one
 `ic-i<n>-<what>` per I rule).
 
 **Schema v1.2 — `kind: discovery`** (design `docs/design/alissa-build-discovery.md` §2.2, lane
@@ -287,6 +288,15 @@ when it creates the task — and carries **`questions`** instead, 1–12 of `{ i
 [{ decision, impact: high | medium | low }] }`. Its `commitClass` is always `doc-correction`, and
 its `repo` is the repository it reads (rule 12 still checks its feed). A code or design task is
 unchanged: `scope` required, no `questions`.
+
+**Schema v1.3 — web discovery and asks** (design §2.2, §4.6, lane DS-10). A discovery task's
+`sources` may say what its questions read — `code`, `web` or `both`; absent reads as `code`, and a
+list of source keys keeps its rule 9 meaning — and `feed_plan` renders anything but `code` as an
+`Alissa-Sources:` trailer, which K6 reads. A `sources: web` task may omit **`repo`**: it reads no
+repository, carries `Alissa-Reads: none`, and rule 12's feed check skips it. A project-less ask
+names **`asker: TASK-<n>`**, the task the question came from, and may omit **`milestone`** — but an
+ask has no plan, so rule 10 refuses a plan task without one. A code or design task carries neither
+`asker` nor a `code | web | both` `sources`.
 
 ```yaml
 kind: discovery
@@ -303,10 +313,25 @@ questions:
 A discovery task (design `alissa-build-discovery.md` §2–§4) answers its questions about one code
 repository, read at a pinned SHA, and writes exactly one new directory here:
 `knowledge-base/<YYYY>/<MM>/<DD>/TASK-<n>/findings.md`, the date being the task's creation day
-(UTC). Its frontmatter validates against `schema/findings.v1.json` (`schema: alissa-findings/v1`,
-`task`, `project`, `reads` — each repository at its 40-hex SHA — `topics`, `questions` with their
-`status`, `confidence`, `answer` or `reason`, `cites` and `unblocks`, then optional `risks` and
-`suggestedTasks`); its body is a `## Summary` and one section per question. The knowledge base is
+(UTC). Its frontmatter validates against `schema/findings.v1.json` (`schema: alissa-findings/v1`
+or `alissa-findings/v1.1`, `task`, `project`, `reads` — each repository at its 40-hex SHA —
+`topics`, `questions` with their `status`, `confidence`, `answer` or `reason`, `cites` and
+`unblocks`, then optional `risks` and `suggestedTasks`); its body is a `## Summary` and one section
+per question.
+
+**Findings v1.1** (design §2.5, §4.6, lane DS-10) widens the same file in place, so every v1 file
+validates as written:
+
+- **The URL cite**, beside the repo cite, in questions and risks alike: `{ kind: url, url,
+  retrievedAt, quote, archive? }`. `url` is `https://`, at most 2,048 characters, with no userinfo
+  and no token-shaped query parameter; `retrievedAt` is RFC 3339 in UTC, not in the future and not
+  before the directory's day; `quote` is 20–300 characters on one line, verbatim from the page;
+  `archive`, when present, is a `web.archive.org/web/<14-digit timestamp>/…` or `archive.ph` capture.
+  A repo cite may say `kind: repo`. At most 48 URL cites per file. A URL cite is admitted only on a
+  task whose `Alissa-Sources:` is `web` or `both` (K6).
+- **The key**: exactly one of `project` and `bodyOfWork` (a `oneOf` — both, or neither, is
+  refused), and `asker: TASK-<n>` on a project-less ask.
+- **`reads` may be empty** when every cite is a URL cite; a repo cite still names a read repository. The knowledge base is
 **append-only**: a merged finding is never edited, and a newer one names it in `reverifies`. The
 index of findings is a Studio projection, never a committed file.
 
@@ -320,11 +345,12 @@ never *nothing to lint* — under the K rules, numbered apart from §5.5's:
 | K3 | completeness | an `answered` or `partial` question with no `answer`; an `unanswerable` one with no `reason`; an `answered` one with no cite; a body with no `## Summary` | — |
 | K4 | size | `findings.md` over 32 KB; more than 12 questions, 12 risks, 8 suggested tasks or 24 cites per entry; a cite spanning more than 400 lines; a `## Summary` over 1,200 characters or a question's section over 6,000 | — |
 | K5 | hygiene | a cite of a deny-listed path, or secret-shaped text anywhere in the file (an assessment's too) — the deny-list and token shapes of Studio's `convex/core/repoContextFilter.ts` (NT-2's list as widened by BC1), inlined in `lint/rules.ts` with the commit and filter version they were copied at | — |
-| K6 | task | a `task` that does not resolve, is not `kind: discovery`, was created on another day (UTC) than its directory's, or whose `Alissa-Reads: <owner>/<repo>@<sha>` trailer pins another SHA than `reads` (or another repository) — `GET /v1/tasks/:id?view=full` with the lint token | Alissa |
+| K6 | task | a `task` that does not resolve, is not `kind: discovery`, was created on another day (UTC) than its directory's, or whose `Alissa-Reads: <owner>/<repo>@<sha>` trailer pins another SHA than `reads` (or another repository); `Alissa-Reads: none` with a non-empty `reads`; a URL cite on a task with no `Alissa-Sources: web` or `both`; an `asker` that does not resolve, belongs to another owner, or differs from the task's `Alissa-Asker:` — `GET /v1/tasks/:id?view=full` with the lint token | Alissa |
 | K7 | cites resolve | a cited path that does not exist at its `reads` SHA, whose blob differs from `blob`, or whose line range runs past the file's end — asked of Studio, never of GitHub | Studio |
+| K8 | external cites hold | a URL cite whose page is `refuted` (it answers, and neither it nor the archive holds the quote), `gone` (404 or 410, and no archive holds it) or `blocked` (401, 403, 429, a paywall, or a URL Studio's fetch guard refuses, and no archive); `unavailable` (a 5xx or a timeout) is *plan-lint could not run*. `archived` — only the archive holds the quote — passes, and the projection marks the cite stale. Asked of Studio, never fetched from the runner | Studio |
 
 ```sh
-npm run plan-lint -- --kb knowledge-base/2026/10/14/TASK-1234             # K1–K7 (K6–K7 need ALISSA_API_TOKEN)
+npm run plan-lint -- --kb knowledge-base/2026/10/14/TASK-1234             # K1–K8 (K6–K8 need ALISSA_API_TOKEN)
 npm run plan-lint -- --kb knowledge-base/2026/10/14/TASK-1234 --offline   # K1–K5 only, no network
 npm run plan-lint -- --kb knowledge-base/assessments/shop-2026-10-14.md --task TASK-2000
 ```
@@ -334,17 +360,37 @@ npm run plan-lint -- --kb knowledge-base/assessments/shop-2026-10-14.md --task T
   token and the body `{ "files": [{ "repo", "sha", "path", "blob", "lines" }] }`, and expects
   `200 { "results": [{ "ok": true } | { "ok": false, "reason": "path_missing" | "blob_mismatch" |
   "lines_out_of_range", "detail"?: "…" }] }`, one result per file in request order.
+- **K8 goes through Studio's url-cites route**, which fetches each page behind DS-16's guarded fetch
+  (https only, every resolved address checked, redirects re-checked, no credentials), so the trusted
+  job, which holds the lint token, never fetches a URL a PR author chose. The linter posts every
+  distinct URL cite once, `POST /v1/factory/url-cites/verify` with the body `{ "cites": [{ "url",
+  "quote", "archive"? }] }`, and expects `200 { "results": [{ "verdict": "holds" | "archived" |
+  "refuted" | "gone" | "blocked" | "unavailable", "detail"?, "guard"?, "archive"? }] }`, one result
+  per cite in request order. **What K8 cannot prove** (design §3.4): that the source is right or
+  current, that the quote supports the answer or is not cut from a context that reverses it, that
+  the live page said it at `retrievedAt` (only an archive carries its own date), anything on a page
+  rendered by script or behind a login, or the synthesis of several true quotes. That is what the
+  light review is for.
+- **The review line.** A finding's report — the check run's summary, and the local `--kb` run's
+  output — ends with one machine-read line: `Discovery-Review: none` when every cite is a repo
+  cite and no question's `unblocks` carries `impact: high`, otherwise `Discovery-Review: light —
+  <reasons>`, the reasons being `external cites: <n>` and `high impact: <question ids>`, joined by
+  `; ` (design §3.6). devloop, revloop and orcloop read this line, never their own reading of the
+  file. Findings too malformed to classify (K2) carry no line; a reader takes a missing line as
+  `light`.
 - **Fail closed.** When the route is down, answers an error or an unexpected shape — or Alissa
-  cannot be read for K6 — the run reports **`plan-lint could not run`**: the check's conclusion is
-  `failure` and its title starts with those words. It is never a pass. Without `ALISSA_API_TOKEN`
-  the linter refuses to run rather than skip K6–K7.
+  cannot be read for K6, or K8's route answers `unavailable` for a cite — the run reports
+  **`plan-lint could not run`**: the check's conclusion is `failure` and its title starts with those
+  words. It is never a pass. Without `ALISSA_API_TOKEN` the linter refuses to run rather than skip
+  K6–K8.
 - **The check's title says the mode**: `PASS — knowledge-base — <dir>`, `FAIL — K<n> (<name>) —
   knowledge-base — <dir>`, or `plan-lint could not run — K<n> (<name>) — <dir>`. orcloop's merge
   edge merges a discovery PR on the first of these (design §3.5).
 - **`lint/VERSION`** is the template's version stamp, `key: value` lines. Studio's advisory
   readiness check `plans-repo-kb-lint` reads it (design §12 Q2): a plans repository whose stamp
-  lacks `modes: … knowledge-base` gets no discovery tasks planned for it. `lint/test/kb.test.ts`
-  keeps the stamp in step with the schemas and the rules.
+  lacks `modes: … knowledge-base` gets no discovery tasks planned for it, and one whose stamp lacks
+  `findings-schema: alissa-findings/v1.1` and `K8` in `kb-rules` gets no URL cites (lane DS-11).
+  `lint/test/kb.test.ts` keeps the stamp in step with the schemas and the rules.
 - **Rollout.** The template changes new plans repositories only; the provisioner never overwrites
   an adopted one. Until an existing repository is upgraded — by an ordinary `TASK-` lane in that
   repository — its `knowledge-base/` pull requests still pass *nothing to lint*, which is why

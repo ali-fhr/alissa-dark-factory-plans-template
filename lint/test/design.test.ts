@@ -69,7 +69,7 @@ type Schema = {
   $id: string;
   title: string;
   required: string[];
-  properties: Record<string, { type?: string; items?: unknown; uniqueItems?: boolean; maxItems?: number; minItems?: number }>;
+  properties: Record<string, { type?: string; items?: unknown; uniqueItems?: boolean; maxItems?: number; minItems?: number; anyOf?: unknown; pattern?: string }>;
   definitions: Record<string, unknown>;
   if?: unknown;
   then?: unknown;
@@ -129,12 +129,12 @@ describe("design pin", () => {
     assert.equal(file, `${blockOf("plan-frontmatter.v1.json")}\n`, "the file is the block's lines, newline-terminated");
   });
 
-  it("schema/task-frontmatter.v1.json is §5.3's block bumped in place to v1.2 — L12's three additions, DS-2's discovery branch, nothing else", () => {
+  it("schema/task-frontmatter.v1.json is §5.3's block bumped in place to v1.3 — L12's three additions, DS-2's discovery branch, DS-10's sources, repo and milestone, nothing else", () => {
     const v1 = JSON.parse(blockOf("task-frontmatter.v1.json")) as Schema;
     const file = JSON.parse(readFileSync(join(ROOT, "schema", "task-frontmatter.v1.json"), "utf8")) as Schema;
     assert.equal(file.$id, v1.$id, "the $id is unchanged, so every $ref to it holds");
-    assert.equal(file.title, v1.title.replace(/version 1$/, "version 1.2"));
-    const { kind, new: newPaths, questions, ...rest } = file.properties;
+    assert.equal(file.title, v1.title.replace(/version 1$/, "version 1.3"));
+    const { kind, new: newPaths, questions, sources, asker, ...rest } = file.properties;
     assert.deepEqual(kind, { type: "string", enum: ["code", "design", "discovery"] }, "v1.2 widens kind to discovery");
     assert.equal(questions?.type, "array");
     assert.deepEqual([questions?.minItems, questions?.maxItems], [1, 12], "1–12 questions (§2.2)");
@@ -143,19 +143,30 @@ describe("design pin", () => {
       description: "A discovery task names no scope (feed_plan derives it under knowledge-base/) and is always doc-correction.",
       required: ["questions"],
       properties: { scope: false, new: false, questions: true, commitClass: { const: "doc-correction" } },
+      allOf: [
+        { if: { required: ["sources"], properties: { sources: { const: "web" } } }, else: { required: ["repo"], properties: { repo: true } } },
+        { if: { required: ["asker"], properties: { asker: true } }, else: { required: ["milestone"], properties: { milestone: true } } },
+      ],
+    }, "v1.3: a `sources: web` task may omit `repo`, an ask (`asker`) its `milestone` (discovery design §2.2)");
+    assert.deepEqual(file.else, {
+      required: ["scope", "repo", "milestone"],
+      properties: { scope: true, repo: true, milestone: true, questions: false, asker: false, sources: { $ref: "#/definitions/sourceKeys" } },
     });
-    assert.deepEqual(file.else, { required: ["scope"], properties: { scope: true, questions: false } });
-    assert.ok(v1.required.includes("scope") && !file.required.includes("scope"), "scope moves from required to the else branch");
+    for (const k of ["scope", "repo", "milestone"]) assert.ok(v1.required.includes(k) && !file.required.includes(k), `${k} moves from required to the branches`);
+    assert.deepEqual(sources?.anyOf, [{ $ref: "#/definitions/sourceKeys" }, { $ref: "#/definitions/discoverySources" }], "v1.3: source keys, or a discovery task's code | web | both");
+    assert.deepEqual(asker?.pattern, "^TASK-[0-9]+$");
     assert.deepEqual(newPaths?.items, { type: "string", pattern: "^[^\\s,*]+$" }, "new[] holds literal paths, as feed_plan's newPaths");
     assert.equal(newPaths?.type, "array");
     assert.equal(newPaths?.uniqueItems, true);
     assert.equal(newPaths?.maxItems, 12);
     assert.deepEqual(file.definitions.edgeType, { type: "string", enum: ["hard", "soft", "acceptance"] });
     assert.ok(!file.required.includes("kind") && !file.required.includes("new"), "both additions are optional");
-    const { oneLine, question, ...definitions } = file.definitions;
+    const { oneLine, question, sourceKeys, discoverySources, ...definitions } = file.definitions;
     assert.ok(oneLine && question, "v1.2 adds the question definitions");
+    assert.deepEqual(sourceKeys, { ...v1.properties.sources }, "v1.3 moves v1's `sources` shape, unchanged, into a definition");
+    assert.deepEqual(discoverySources, { type: "string", enum: ["code", "web", "both"] });
     const { if: _if, then: _then, else: _else, ...base } = file;
-    const back = { ...base, title: v1.title, required: v1.required, properties: rest, definitions: { ...definitions, edgeType: v1.definitions.edgeType } };
+    const back = { ...base, title: v1.title, required: v1.required, properties: { ...rest, sources: v1.properties.sources }, definitions: { ...definitions, edgeType: v1.definitions.edgeType } };
     assert.deepEqual(back, v1, "with the additions taken out, the schema is §5.3's");
   });
 

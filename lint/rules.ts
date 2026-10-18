@@ -77,6 +77,15 @@ export interface LintResult {
   warnings: string[];
 }
 
+/**
+ * What rendering needs from a task file. Schema v1.3 lets a `sources: web` discovery task omit
+ * `repo` — it reads pages, not a repository — so the Summary names `web` in its place.
+ */
+export function planTaskView(fm: unknown): TaskView | null {
+  if (isRecord(fm) && fm.repo === undefined && fm.kind === "discovery" && fm.sources === "web") return taskView({ ...fm, repo: "web" });
+  return taskView(fm);
+}
+
 /** `reader` reads Alissa (rules 10–12); `github` reads the target repositories (rule 5b). */
 export type LintOptions = { online: false } | { online: true; reader: AlissaReader; github: AlissaReader };
 
@@ -110,7 +119,7 @@ export function clean(v: unknown): string {
 function ajvMessage(e: ErrorObject): string {
   const where = e.instancePath === "" ? "(root)" : e.instancePath;
   // Schema v1.2's `kind: discovery` branch: a field the branch forbids is a `false` schema.
-  if (e.keyword === "false schema") return `${where} is not allowed on this kind of task (schema v1.2: a discovery task has \`questions\` and no \`scope\` or \`new\`; a code or design task the reverse)`;
+  if (e.keyword === "false schema") return `${where} is not allowed on this kind of task (schema v1.3: a discovery task has \`questions\` and no \`scope\` or \`new\`; a code or design task the reverse, and no \`asker\`)`;
   const extra =
     e.keyword === "additionalProperties" ? ` \`${clean((e.params as { additionalProperty: string }).additionalProperty)}\``
     : e.keyword === "enum" ? `: ${(e.params as { allowedValues: unknown[] }).allowedValues.join(", ")}`
@@ -218,7 +227,7 @@ export async function lint(src: PlanSource, opts: LintOptions): Promise<LintResu
       continue;
     }
     info.fm = parsed.value;
-    info.view = taskView(parsed.value);
+    info.view = planTaskView(parsed.value);
     let rule2 = 0;
     if (!validateTask(parsed.value)) {
       // `if` only says which v1.2 branch failed; the branch's own errors say why.
@@ -328,7 +337,9 @@ export async function lint(src: PlanSource, opts: LintOptions): Promise<LintResu
   if (planClean && planFm) {
     const planKeys = new Set(((planFm.sources as Array<{ key: string }>) ?? []).map((s) => s.key));
     for (const t of cleanTasks) {
-      for (const key of (fmOf(t).sources as string[] | undefined) ?? []) {
+      // A discovery task's `sources` may name `code | web | both` (schema v1.3) instead of source keys.
+      const keys = fmOf(t).sources;
+      for (const key of Array.isArray(keys) ? (keys as string[]) : []) {
         if (!planKeys.has(key)) fail(9, `source \`${clean(key)}\` is not one of plan.md's sources`, t.file);
       }
     }
@@ -491,8 +502,9 @@ async function online(planFm: Record<string, unknown>, tasks: TaskInfo[], reader
       fail(10, `plan.md's milestone \`${planMilestone}\` is not the anchor's (\`${anchorBow}\`)`, "plan.md");
     }
     for (const t of tasks) {
-      const tm = fm(t).milestone as string;
-      if (!bows.has(tm)) fail(10, `milestone \`${tm}\` is not one of program \`${program}\`'s milestone bodies of work`, t.file);
+      const tm = fm(t).milestone as string | undefined;
+      if (tm === undefined) fail(10, "the task names no `milestone` — schema v1.3 omits it only on a project-less ask (`asker`), which no plan carries (§4.6); a plan's task lands in its milestone", t.file);
+      else if (!bows.has(tm)) fail(10, `milestone \`${tm}\` is not one of program \`${program}\`'s milestone bodies of work`, t.file);
       else if (anchorBow !== null && tm !== anchorBow) fail(10, `milestone \`${tm}\` is not the anchor's (\`${anchorBow}\`) — on a ${anchor.kind} anchor every task lands in it`, t.file);
     }
   });
@@ -512,7 +524,9 @@ async function online(planFm: Record<string, unknown>, tasks: TaskInfo[], reader
       if (m && m[1]) feeds.add(m[1].toLowerCase());
     }
     for (const t of tasks) {
-      const repo = fm(t).repo as string;
+      // Schema v1.3: a `sources: web` discovery task reads no repository, so it has no feed to check.
+      const repo = fm(t).repo as string | undefined;
+      if (repo === undefined) continue;
       if (!feeds.has(repo.toLowerCase())) fail(12, `repo \`${repo}\` has no \`autodev: ${repo}\` feed body of work — it is not a fed repository`, t.file);
     }
 
@@ -651,14 +665,16 @@ function sortFailures(f: Failure[]): Failure[] {
   return f.map((x, i) => ({ x, i })).sort((a, b) => ruleRank(a.x.rule) - ruleRank(b.x.rule) || a.i - b.i).map(({ x }) => x);
 }
 
-// ── The knowledge-base mode: K1–K7 (design alissa-build-discovery §3.4) ──────────────────────────
+// ── The knowledge-base mode: K1–K8 (design alissa-build-discovery §3.4) ──────────────────────────
 // A pull request that changes any `knowledge-base/**` file is linted under these rules, numbered
-// apart from §5.5's. K1–K5 need no network; K6 reads the task with the lint token, and K7 asks
-// Studio's verify route whether each cite holds at its pinned SHA. Every rule runs; the verdict is
-// the first failure. K7 with the route unavailable is "plan-lint could not run" — a failure, never
-// a pass.
+// apart from §5.5's. K1–K5 need no network; K6 reads the task with the lint token, K7 asks
+// Studio's verify route whether each repo cite holds at its pinned SHA, and K8 (v1.1) asks Studio's
+// url-cites route whether each URL cite's page, or its archive, still holds the quote. Every rule
+// runs; the verdict is the first failure. K7 or K8 with the route unavailable is "plan-lint could
+// not run" — a failure, never a pass. The same run classifies the finding for review: its report
+// ends with the `Discovery-Review:` line (§3.6).
 
-export type KRule = "K1" | "K2" | "K3" | "K4" | "K5" | "K6" | "K7";
+export type KRule = "K1" | "K2" | "K3" | "K4" | "K5" | "K6" | "K7" | "K8";
 
 export const K_RULE_NAMES: Readonly<Record<KRule, string>> = {
   K1: "layout and immutability",
@@ -668,19 +684,94 @@ export const K_RULE_NAMES: Readonly<Record<KRule, string>> = {
   K5: "hygiene",
   K6: "task",
   K7: "cites resolve",
+  K8: "external cites hold",
 };
 
-/** §2.3's limits. */
+/** §2.3's limits, and §2.5's for URL cites. */
 export const KB_LIMITS = {
   fileBytes: 32 * 1024,
   questionsMin: 1, questionsMax: 12,
   risksMax: 12, suggestedTasksMax: 8, citesMax: 24,
   lineSpanMax: 400,
   summaryChars: 1200, questionSectionChars: 6000,
+  urlCitesMax: 48, urlChars: 2048, quoteMin: 20, quoteMax: 300,
 } as const;
+
+export const FINDINGS_SCHEMA_V1 = "alissa-findings/v1";
+/** v1.1 (§2.5, §4.6): the URL cite, `project | bodyOfWork` with `asker`, `reads` that may be empty. */
+export const FINDINGS_SCHEMA_V11 = "alissa-findings/v1.1";
 
 /** Studio's cite check (lane DS-3), on the lint token. */
 export const VERIFY_ROUTE = "/v1/factory/repo-files/verify";
+/** Studio's URL cite check (lane DS-11), behind DS-16's guarded fetch, on the same token. */
+export const URL_CITES_ROUTE = "/v1/factory/url-cites/verify";
+
+/**
+ * K2's archive hosts and K5's URL hygiene, inlined from studio.alissa.app `convex/core/urlCites.ts`
+ * at commit 973077759f6fcdac385954e7a32961f27be26edf (lane DS-11; §12 Q13). Each host carries the
+ * capture's own date; a `web.archive.org` copy names a 14-digit timestamp. A host is added here and
+ * there together.
+ */
+export const KB_ARCHIVE_HOSTS = ["web.archive.org", "archive.ph"] as const;
+const WAYBACK_PATH_RE = /^\/web\/\d{14}(?:[a-z]{2}_)?\/\S+$/;
+const TOKEN_PARAM_NAME_RE = /(?:^|[_.-])(?:access[_-]?token|token|secret|password|passwd|signature|sig|api[_-]?key|apikey|key|auth|session(?:id)?|credentials?)$/i;
+const OPAQUE_VALUE_RE = /^(?=.*[0-9])(?=.*[A-Za-z])[A-Za-z0-9_+/=.-]{40,}$/;
+/** A `retrievedAt` a little ahead of the runner's clock is skew, not the future. */
+const RETRIEVED_AT_SKEW_MS = 5 * 60_000;
+const RFC3339_UTC_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?Z$/;
+
+/** Why `raw` is not an `https://` URL §2.5 admits (K2), or null. */
+export function urlShapeRefusal(raw: string): string | null {
+  if (raw.length > KB_LIMITS.urlChars) return `is ${raw.length} characters; at most ${KB_LIMITS.urlChars}`;
+  if (/\s/.test(raw)) return "holds whitespace";
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return "is not a URL";
+  }
+  if (url.protocol !== "https:") return "is not https://";
+  if (url.hostname === "") return "names no host";
+  return null;
+}
+
+/** Why `raw` is not a capture on a host K8 trusts (K2, §12 Q13), or null. */
+export function archiveRefusal(raw: string): string | null {
+  const shape = urlShapeRefusal(raw);
+  if (shape) return shape;
+  const url = new URL(raw);
+  const host = url.hostname.toLowerCase();
+  if (!(KB_ARCHIVE_HOSTS as readonly string[]).includes(host)) return `is on ${host}, which is not an archive host K8 trusts (${KB_ARCHIVE_HOSTS.join(", ")})`;
+  if (host === "web.archive.org" && !WAYBACK_PATH_RE.test(url.pathname + url.search)) return "is not a web.archive.org capture (`/web/<14-digit timestamp>/<url>`)";
+  if (host === "archive.ph" && (url.pathname === "/" || url.pathname === "")) return "names no archive.ph capture";
+  return null;
+}
+
+/** Why `raw` carries a credential (K5: userinfo, or a token-shaped query parameter), or null. Never the value itself. */
+export function urlHygieneRefusal(raw: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (url.username !== "" || url.password !== "") return "carries userinfo";
+  for (const [name, value] of url.searchParams) {
+    if (TOKEN_PARAM_NAME_RE.test(name)) return `carries a token-shaped query parameter (\`${clean(name.slice(0, 40))}\`)`;
+    if (secretShapedLines(value).length > 0 || OPAQUE_VALUE_RE.test(value)) return "carries a token-shaped query parameter value";
+  }
+  return null;
+}
+
+/** `retrievedAt` → epoch ms, or null when it is not RFC 3339 in UTC or not a real time. */
+export function retrievedAtMs(s: string): number | null {
+  const m = RFC3339_UTC_RE.exec(s);
+  if (!m) return null;
+  const [y, mo, d, h, mi, se] = m.slice(1, 7).map(Number) as [number, number, number, number, number, number];
+  const back = new Date(Date.UTC(y, mo - 1, d, h, mi, se));
+  if (back.getUTCFullYear() !== y || back.getUTCMonth() !== mo - 1 || back.getUTCDate() !== d || h > 23 || mi > 59 || se > 59) return null;
+  return Date.parse(s);
+}
 
 /**
  * K5's deny-list and token shapes, inlined from studio.alissa.app `convex/core/repoContextFilter.ts`
@@ -766,6 +857,12 @@ export interface KbFailure {
   couldNotRun?: boolean;
 }
 
+/** §3.6's classification: `light` for a URL cite or a `high`-impact question, with the reasons. */
+export interface DiscoveryReview {
+  level: "none" | "light";
+  reasons: string[];
+}
+
 export interface KbLintResult {
   target: string;
   kind: "findings" | "assessment";
@@ -773,11 +870,18 @@ export interface KbLintResult {
   failures: KbFailure[];
   rulesRun: KRule[];
   notes: string[];
+  /** The `Discovery-Review:` line's value; `null` for an assessment, or findings too malformed to classify. */
+  review: DiscoveryReview | null;
+}
+
+/** The machine-read line the report ends with (§3.4, §3.6): devloop, revloop and orcloop read it. */
+export function discoveryReviewLine(r: DiscoveryReview): string {
+  return r.level === "none" ? "Discovery-Review: none" : `Discovery-Review: light — ${r.reasons.join("; ")}`;
 }
 
 /**
  * `reader` reads the task (K6, and K1's design-task check for an assessment); `verifier` posts
- * K7's cites to Studio. `prTask` is the pull request's own `TASK-<n>` (its branch), which an
+ * K7's cites and K8's URL cites to Studio. `prTask` is the pull request's own `TASK-<n>` (its branch), which an
  * assessment PR needs.
  */
 export type KbLintOptions =
@@ -789,6 +893,15 @@ interface Cite {
   path: string;
   lines: string;
   blob: string;
+}
+
+/** A URL cite (v1.1, §2.5): the page, when it was read, the sentence it holds, its archived copy. */
+interface UrlCite {
+  kind: "url";
+  url: string;
+  retrievedAt: string;
+  quote: string;
+  archive?: string;
 }
 
 let findingsValidator: ValidateFunction | null = null;
@@ -806,7 +919,58 @@ function isKbSizeError(e: ErrorObject): boolean {
   return (e.keyword === "maxItems" || e.keyword === "minItems") && /^\/(questions|risks|suggestedTasks)(\/\d+\/cites)?$/.test(e.instancePath);
 }
 
+const CITE_PATH_RE = /^\/(questions|risks)\/(\d+)\/cites\/(\d+)/;
+
+/**
+ * The schema's errors as K2 reports them. A cite is a `oneOf` of the repo cite and the URL cite,
+ * and a v1 file's cites are the v1 repo cite: only the branch the cite's `kind` selects speaks, so
+ * a bad cite reads as one shape's complaints, not both. The root `oneOf` is `project | bodyOfWork`.
+ */
+function kbSchemaErrors(errors: ErrorObject[], fm: unknown): Array<ErrorObject | string> {
+  const doc = isRecord(fm) ? fm : {};
+  const v1 = doc.schema === FINDINGS_SCHEMA_V1;
+  const out: Array<ErrorObject | string> = [];
+  const said = new Set<string>();
+  const say = (x: ErrorObject | string): void => {
+    const key = typeof x === "string" ? x : `${x.instancePath} ${x.message} ${JSON.stringify(x.params)}`;
+    if (!said.has(key)) {
+      said.add(key);
+      out.push(x);
+    }
+  };
+  for (const e of errors) {
+    if (e.keyword === "if" || e.schemaPath.startsWith("#/oneOf/")) continue;
+    if (e.keyword === "oneOf" && e.instancePath === "") {
+      const both = doc.project !== undefined && doc.bodyOfWork !== undefined;
+      say(both ? "carries both `project` and `bodyOfWork` — a finding is keyed by exactly one of them (§4.6)" : "carries neither `project` nor `bodyOfWork` — a finding is keyed by exactly one of them (§4.6)");
+      continue;
+    }
+    const m = CITE_PATH_RE.exec(e.instancePath);
+    if (m) {
+      const list = doc[m[1] as string];
+      const entry = Array.isArray(list) ? list[Number(m[2])] : undefined;
+      const cites = isRecord(entry) ? entry.cites : undefined;
+      const cite = Array.isArray(cites) ? cites[Number(m[3])] : undefined;
+      const url = isRecord(cite) && cite.kind === "url";
+      if (e.keyword === "oneOf" && e.schemaPath === "#/definitions/cite/oneOf") continue;
+      if (url && v1) {
+        say(`frontmatter ${e.instancePath.slice(0, m[0].length)} is a URL cite — it needs \`schema: ${FINDINGS_SCHEMA_V11}\` (§2.5)`);
+        continue;
+      }
+      const branch = e.schemaPath.startsWith("#/definitions/urlCite/") ? "url" : e.schemaPath.startsWith("#/definitions/repoCite") ? "repo" : null;
+      if (branch !== null && branch !== (url ? "url" : "repo")) continue;
+    }
+    say(e);
+  }
+  return out;
+}
+
 const READS_TRAILER_RE = /^[ \t]*Alissa-Reads[ \t]*:[ \t]*([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)@([0-9a-f]{40})[ \t]*$/gim;
+const READS_NONE_RE = /^[ \t]*Alissa-Reads[ \t]*:[ \t]*none[ \t]*$/im;
+const SOURCES_TRAILER_RE = /^[ \t]*Alissa-Sources[ \t]*:[ \t]*(\S+)[ \t]*$/im;
+const ASKER_TRAILER_RE = /^[ \t]*Alissa-Asker[ \t]*:[ \t]*(\S+)[ \t]*$/im;
+/** §3.4's K8 verdicts, as Studio's url-cites route answers them. */
+const URL_VERDICTS = new Set(["holds", "archived", "refuted", "gone", "blocked", "unavailable"]);
 const VERIFY_REASONS: Readonly<Record<string, string>> = {
   path_missing: "does not exist at the pinned SHA",
   blob_mismatch: "has a different blob at the pinned SHA",
@@ -830,8 +994,9 @@ export async function lintKb(src: KbSource, opts: KbLintOptions): Promise<KbLint
     failures.push({ rule, message, ...(file === undefined ? {} : { file }), ...(couldNotRun ? { couldNotRun } : {}) });
   };
   let questionCount = 0;
+  let review: DiscoveryReview | null = null;
   const result = (rulesRun: KRule[]): KbLintResult => ({
-    target: src.label, kind: src.kind, questionCount, failures: sortKb(failures), rulesRun, notes,
+    target: src.label, kind: src.kind, questionCount, failures: sortKb(failures), rulesRun, notes, review,
   });
 
   // K1 — layout and immutability (found by the reader).
@@ -860,7 +1025,7 @@ export async function lintKb(src: KbSource, opts: KbLintOptions): Promise<KbLint
       const lines = secretShapedLines(text);
       if (lines.length > 0) fail("K5", `secret-shaped text on line(s) ${lines.join(", ")} — the token shapes of repoContextFilter.ts (§10)`, file);
     }
-    notes.push("an assessment is a design document: K2–K4, K6 and K7 apply to findings only");
+    notes.push("an assessment is a design document: K2–K4 and K6–K8 apply to findings only");
     return result(["K1", "K5"]);
   }
 
@@ -868,7 +1033,7 @@ export async function lintKb(src: KbSource, opts: KbLintOptions): Promise<KbLint
   const bytes = src.sizes.get(FINDINGS_FILE);
   if (bytes !== undefined && bytes > KB_LIMITS.fileBytes) fail("K4", `findings.md is ${bytes} bytes; the limit is ${KB_LIMITS.fileBytes} (§2.3)`, FINDINGS_FILE);
   if (text === undefined) {
-    notes.push("K2–K7 not run: no readable findings.md");
+    notes.push("K2–K8 not run: no readable findings.md");
     return result(["K1", "K4"]);
   }
 
@@ -889,8 +1054,9 @@ export async function lintKb(src: KbSource, opts: KbLintOptions): Promise<KbLint
     else {
       const validate = findingsSchema();
       if (!validate(parsed.value)) {
-        for (const e of validate.errors ?? []) {
-          if (isKbSizeError(e)) fail("K4", `frontmatter ${ajvMessage(e)} (§2.3)`, FINDINGS_FILE);
+        for (const e of kbSchemaErrors(validate.errors ?? [], parsed.value)) {
+          if (typeof e === "string") k2fail(e);
+          else if (isKbSizeError(e)) fail("K4", `frontmatter ${ajvMessage(e)} (§2.3)`, FINDINGS_FILE);
           else if (e.keyword === "type" && /\/(sha|blob|lines)$/.test(e.instancePath)) k2fail(`frontmatter ${ajvMessage(e)} — YAML reads an all-digit value as a number; quote it`);
           else k2fail(`frontmatter ${ajvMessage(e)}`);
         }
@@ -901,6 +1067,7 @@ export async function lintKb(src: KbSource, opts: KbLintOptions): Promise<KbLint
   const questions = fm ? (fm.questions as Array<Record<string, unknown>>) : [];
   const risks = fm ? ((fm.risks as Array<Record<string, unknown>> | undefined) ?? []) : [];
   questionCount = questions.length;
+  const { repoCites, urlCites } = citesOf(questions, risks);
   if (fm) {
     if (src.task !== null && fm.task !== src.task) k2fail(`\`task\` is \`${clean(fm.task)}\` but the directory is \`${src.task}\``);
     const reads = fm.reads as Array<{ repo: string; sha: string }>;
@@ -914,8 +1081,26 @@ export async function lintKb(src: KbSource, opts: KbLintOptions): Promise<KbLint
       if (ids.has(q.id as string)) k2fail(`question id \`${clean(q.id)}\` appears twice`);
       ids.add(q.id as string);
     }
-    for (const c of allCites(questions, risks)) {
+    for (const c of repoCites) {
       if (!readRepos.has(c.repo.toLowerCase())) k2fail(`a cite names \`${clean(c.repo)}\`, which is not in \`reads\` — every cite is read at a pinned SHA`);
+    }
+    // v1.1's URL cite (§2.5): an https page, read no later than now and no earlier than the task's
+    // creation day — the directory's day, which K6 holds to the task's — and an archive K8 trusts.
+    const now = Date.now();
+    const dayStart = src.day === null ? null : Date.parse(`${src.day}T00:00:00Z`);
+    for (const c of urlCites) {
+      const where = `URL cite \`${clean(c.url)}\``;
+      const shape = urlShapeRefusal(c.url);
+      if (shape) k2fail(`${where} ${shape} (§2.5)`);
+      const at = retrievedAtMs(c.retrievedAt);
+      if (at === null) k2fail(`${where}: \`retrievedAt\` \`${clean(c.retrievedAt)}\` is not a real RFC 3339 time in UTC (\`YYYY-MM-DDThh:mm:ssZ\`)`);
+      else if (at > now + RETRIEVED_AT_SKEW_MS) k2fail(`${where}: \`retrievedAt\` \`${c.retrievedAt}\` is in the future`);
+      else if (dayStart !== null && at < dayStart) k2fail(`${where}: \`retrievedAt\` \`${c.retrievedAt}\` is before the task's creation day, ${src.day} (§2.5)`);
+      if (c.quote.trim() !== c.quote) k2fail(`${where}: the \`quote\` has leading or trailing whitespace — it is copied verbatim`);
+      if (c.archive !== undefined) {
+        const refused = archiveRefusal(c.archive);
+        if (refused) k2fail(`${where}: the archive \`${clean(c.archive)}\` ${refused} (§12 Q13)`);
+      }
     }
     if (k2 > 0) fm = null;
   }
@@ -927,20 +1112,21 @@ export async function lintKb(src: KbSource, opts: KbLintOptions): Promise<KbLint
       const has = (k: string): boolean => typeof q[k] === "string" && (q[k] as string).trim() !== "";
       if ((q.status === "answered" || q.status === "partial") && !has("answer")) fail("K3", `question \`${id}\` is \`${q.status}\` but has no \`answer\``, FINDINGS_FILE);
       if (q.status === "unanswerable" && !has("reason")) fail("K3", `question \`${id}\` is \`unanswerable\` but gives no \`reason\``, FINDINGS_FILE);
-      if (q.status === "answered" && (!Array.isArray(q.cites) || q.cites.length === 0)) fail("K3", `question \`${id}\` is \`answered\` but cites nothing — an answer is grounded in the code (§2.3)`, FINDINGS_FILE);
+      if (q.status === "answered" && (!Array.isArray(q.cites) || q.cites.length === 0)) fail("K3", `question \`${id}\` is \`answered\` but cites nothing — an answer is grounded in the code or a page (§2.3, §2.5)`, FINDINGS_FILE);
     }
     const sections = body === null ? [] : level2Sections(body).sections;
     if (!sections.some((s) => s.title === "Summary")) fail("K3", "the body has no `## Summary` — it is what the Findings evidence carries (§2.4)", FINDINGS_FILE);
   }
 
-  // K4 — size: line spans and the body's sections (the counts came from the schema above).
+  // K4 — size: line spans, the file's URL cites and the body's sections (the counts came from the schema above).
   if (fm) {
-    for (const c of allCites(questions, risks)) {
+    for (const c of repoCites) {
       const [a, b] = c.lines.split("-").map(Number) as [number, number | undefined];
       const where = `cite \`${clean(c.path)}\` lines \`${c.lines}\``;
       if (b !== undefined && b < a) fail("K4", `${where} runs backwards`, FINDINGS_FILE);
       else if (b !== undefined && b - a > KB_LIMITS.lineSpanMax) fail("K4", `${where} spans ${b - a} lines; at most ${KB_LIMITS.lineSpanMax} (§2.3)`, FINDINGS_FILE);
     }
+    if (urlCites.length > KB_LIMITS.urlCitesMax) fail("K4", `the file carries ${urlCites.length} URL cites; at most ${KB_LIMITS.urlCitesMax}, across questions and risks — K8 fetches each one (§2.5)`, FINDINGS_FILE);
   }
   if (body !== null) {
     for (const s of level2Sections(body).sections) {
@@ -950,38 +1136,65 @@ export async function lintKb(src: KbSource, opts: KbLintOptions): Promise<KbLint
     }
   }
 
-  // K5 — hygiene: no cite to a deny-listed path, no secret-shaped text anywhere in the file.
+  // K5 — hygiene: no cite to a deny-listed path, no credential in a URL, no secret-shaped text anywhere in the file.
   if (fm) {
-    for (const c of allCites(questions, risks)) {
+    for (const c of repoCites) {
       if (isDeniedPath(c.path)) fail("K5", `a cite names \`${clean(c.path)}\`, a deny-listed path — the worker never opens it (§10)`, FINDINGS_FILE);
+    }
+    for (const c of urlCites) {
+      for (const [what, url] of [["URL cite", c.url], ["archive", c.archive]] as const) {
+        const why = url === undefined ? null : urlHygieneRefusal(url);
+        if (why) fail("K5", `a${what === "archive" ? "n" : ""} ${what} ${why} — a cite never carries a credential (§3.4 K5)`, FINDINGS_FILE);
+      }
     }
   }
   const secretLines = secretShapedLines(text);
   if (secretLines.length > 0) fail("K5", `secret-shaped text on line(s) ${secretLines.join(", ")} — the token shapes of repoContextFilter.ts (§10)`, FINDINGS_FILE);
 
+  // §3.6 — the review line: `light` for any URL cite or any `high`-impact question, else `none`.
+  if (fm) {
+    const high = questions.filter((q) => ((q.unblocks as Array<{ impact?: unknown }> | undefined) ?? []).some((u) => u.impact === "high")).map((q) => q.id as string);
+    const reasons = [...(urlCites.length > 0 ? [`external cites: ${urlCites.length}`] : []), ...(high.length > 0 ? [`high impact: ${high.join(", ")}`] : [])];
+    review = { level: reasons.length > 0 ? "light" : "none", reasons };
+  } else notes.push("Discovery-Review: not classified — the frontmatter is not valid (K2); a reader treats a missing line as light");
+
   if (!opts.online) {
-    notes.push("K6–K7 not run (offline)");
+    notes.push("K6–K8 not run (offline)");
     return result(["K1", "K2", "K3", "K4", "K5"]);
   }
   if (!fm) {
-    notes.push("K6–K7 not evaluated: the frontmatter is not valid (K2)");
-    return result(["K1", "K2", "K3", "K4", "K5", "K6", "K7"]);
+    notes.push("K6–K8 not evaluated: the frontmatter is not valid (K2)");
+    return result(["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8"]);
   }
-  await kbTask(fm, src, opts.reader, fail);
-  await kbCites(allCites(questions, risks), fm.reads as Array<{ repo: string; sha: string }>, opts.verifier, fail, notes);
-  return result(["K1", "K2", "K3", "K4", "K5", "K6", "K7"]);
+  await kbTask(fm, src, urlCites.length, opts.reader, fail);
+  await kbCites(repoCites, fm.reads as Array<{ repo: string; sha: string }>, opts.verifier, fail, notes);
+  if (urlCites.length > KB_LIMITS.urlCitesMax) notes.push(`K8 not run: ${urlCites.length} URL cites is past the route's ${KB_LIMITS.urlCitesMax} (K4)`);
+  else await kbUrlCites(urlCites, opts.verifier, fail, notes);
+  return result(["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8"]);
 }
 
-function allCites(questions: Array<Record<string, unknown>>, risks: Array<Record<string, unknown>>): Cite[] {
-  const out: Cite[] = [];
-  for (const x of [...questions, ...risks]) if (Array.isArray(x.cites)) out.push(...(x.cites as Cite[]));
-  return out;
+/** Every cite of the questions and the risks, split by kind: a repo cite has no `kind`, or `kind: repo`. */
+function citesOf(questions: Array<Record<string, unknown>>, risks: Array<Record<string, unknown>>): { repoCites: Cite[]; urlCites: UrlCite[] } {
+  const repoCites: Cite[] = [];
+  const urlCites: UrlCite[] = [];
+  for (const x of [...questions, ...risks]) {
+    if (!Array.isArray(x.cites)) continue;
+    for (const c of x.cites as Array<Record<string, unknown>>) {
+      if (c.kind === "url") urlCites.push(c as unknown as UrlCite);
+      else repoCites.push(c as unknown as Cite);
+    }
+  }
+  return { repoCites, urlCites };
 }
 
 type KbFail = (rule: KRule, message: string, file?: string, couldNotRun?: boolean) => void;
 
-/** K6: the task resolves, is a discovery task created on the directory's day, and pinned what `reads` says. */
-async function kbTask(fm: Record<string, unknown>, src: KbSource, reader: AlissaReader, fail: KbFail): Promise<void> {
+/**
+ * K6: the task resolves, is a discovery task created on the directory's day, and pinned what `reads`
+ * says (`Alissa-Reads: none` for no read); v1.1: a URL cite only on a task whose `Alissa-Sources:` is
+ * `web` or `both`, and an ask's `asker` resolving to a task of the same owner (§2.5, §3.4, §4.6).
+ */
+async function kbTask(fm: Record<string, unknown>, src: KbSource, urlCiteCount: number, reader: AlissaReader, fail: KbFail): Promise<void> {
   const task = fm.task as string;
   let res;
   try {
@@ -998,14 +1211,52 @@ async function kbTask(fm: Record<string, unknown>, src: KbSource, reader: Alissa
   else if (src.day !== null && utcDay(t.createdAt) !== src.day) {
     fail("K6", `\`${task}\` was created on ${utcDay(t.createdAt)} (UTC), but its directory is dated ${src.day} (§4.2)`, FINDINGS_FILE);
   }
-  const pinned = new Map<string, string>();
-  for (const m of (typeof t.description === "string" ? t.description : "").matchAll(READS_TRAILER_RE)) pinned.set((m[1] as string).toLowerCase(), m[2] as string);
-  if (pinned.size === 0) return fail("K6", `\`${task}\` carries no \`Alissa-Reads: <owner>/<repo>@<sha>\` trailer — its read SHA is unknown, so K6 refuses rather than guesses`, FINDINGS_FILE);
-  for (const r of fm.reads as Array<{ repo: string; sha: string }>) {
-    const want = pinned.get(r.repo.toLowerCase());
-    if (want === undefined) fail("K6", `\`reads\` names \`${clean(r.repo)}\`, which \`${task}\` does not read (its Alissa-Reads: ${[...pinned.keys()].join(", ")})`, FINDINGS_FILE);
-    else if (want !== r.sha) fail("K6", `\`reads\` pins \`${clean(r.repo)}\` at \`${r.sha}\`, but \`${task}\`'s Alissa-Reads pins \`${want}\``, FINDINGS_FILE);
+  const description = typeof t.description === "string" ? t.description : "";
+
+  // The sources: absent reads as `code`, which admits no URL cite (§2.2, §2.5).
+  const declared = SOURCES_TRAILER_RE.exec(description)?.[1];
+  const sources = declared ?? "code";
+  if (declared !== undefined && !["code", "web", "both"].includes(declared)) fail("K6", `\`${task}\` carries \`Alissa-Sources: ${clean(declared)}\` — it is \`code\`, \`web\` or \`both\``, FINDINGS_FILE);
+  else if (urlCiteCount > 0 && sources !== "web" && sources !== "both") {
+    fail("K6", `the findings carry ${urlCiteCount} URL cite(s), but \`${task}\` reads \`sources: ${clean(sources)}\` (no \`Alissa-Sources: web\` or \`both\`) — a code question keeps the strong check (§2.5)`, FINDINGS_FILE);
   }
+
+  // The reads: each pinned by the task's Alissa-Reads; `Alissa-Reads: none` matches an empty `reads`.
+  const reads = fm.reads as Array<{ repo: string; sha: string }>;
+  const pinned = new Map<string, string>();
+  for (const m of description.matchAll(READS_TRAILER_RE)) pinned.set((m[1] as string).toLowerCase(), m[2] as string);
+  if (pinned.size === 0 && READS_NONE_RE.test(description)) {
+    if (reads.length > 0) fail("K6", `\`${task}\` carries \`Alissa-Reads: none\`, but \`reads\` names ${reads.map((r) => `\`${clean(r.repo)}\``).join(", ")} — a task that reads no repository cites none`, FINDINGS_FILE);
+  } else if (pinned.size === 0) {
+    fail("K6", `\`${task}\` carries no \`Alissa-Reads: <owner>/<repo>@<sha>\` trailer — its read SHA is unknown, so K6 refuses rather than guesses`, FINDINGS_FILE);
+  } else {
+    for (const r of reads) {
+      const want = pinned.get(r.repo.toLowerCase());
+      if (want === undefined) fail("K6", `\`reads\` names \`${clean(r.repo)}\`, which \`${task}\` does not read (its Alissa-Reads: ${[...pinned.keys()].join(", ")})`, FINDINGS_FILE);
+      else if (want !== r.sha) fail("K6", `\`reads\` pins \`${clean(r.repo)}\` at \`${r.sha}\`, but \`${task}\`'s Alissa-Reads pins \`${want}\``, FINDINGS_FILE);
+    }
+  }
+
+  // The asker (§4.6): it resolves to a task of the discovery task's own owner, and agrees with the task's Alissa-Asker.
+  const trailerAsker = ASKER_TRAILER_RE.exec(description)?.[1] ?? null;
+  const asker = typeof fm.asker === "string" ? fm.asker : null;
+  if (trailerAsker !== null && trailerAsker !== asker) {
+    fail("K6", `\`${task}\` was asked by \`${clean(trailerAsker)}\` (its Alissa-Asker), but the finding's \`asker\` is ${asker === null ? "absent" : `\`${asker}\``}`, FINDINGS_FILE);
+  }
+  if (asker === null) return;
+  let ask;
+  try {
+    ask = await reader.get(`/v1/tasks/${encodeURIComponent(asker)}`);
+  } catch (err) {
+    if (err instanceof AlissaUnavailable) return fail("K6", `plan-lint could not run: could not read the asker \`${asker}\`: ${err.message}`, FINDINGS_FILE, true);
+    throw err;
+  }
+  if (ask.status === 404) return fail("K6", `the asker \`${asker}\` does not resolve (${describe(ask)})`, FINDINGS_FILE);
+  if (ask.status !== 200) return fail("K6", `plan-lint could not run: could not read the asker \`${asker}\`: ${describe(ask)}`, FINDINGS_FILE, true);
+  const owner = (ask.body as { task?: { ownerId?: unknown } } | null)?.task?.ownerId;
+  if (typeof owner !== "string" || typeof t.ownerId !== "string") {
+    fail("K6", `the asker \`${asker}\` or \`${task}\` carries no owner to compare — K6 refuses rather than guesses (§4.6)`, FINDINGS_FILE);
+  } else if (owner !== t.ownerId) fail("K6", `the asker \`${asker}\` belongs to another owner than \`${task}\` — an ask never crosses owners (§4.6)`, FINDINGS_FILE);
 }
 
 /**
@@ -1025,7 +1276,7 @@ async function kbCites(cites: Cite[], reads: Array<{ repo: string; sha: string }
     files.push({ ...c, sha: shaOf.get(c.repo.toLowerCase()) as string });
   }
   if (files.length === 0) {
-    notes.push("K7: the findings cite nothing");
+    notes.push("K7: the findings cite no repository file");
     return;
   }
   const couldNot = (why: string): void => fail("K7", `plan-lint could not run: Studio's verify route (POST ${VERIFY_ROUTE}) ${why} — a cite that cannot be checked is never a pass`, FINDINGS_FILE, true);
@@ -1048,6 +1299,64 @@ async function kbCites(cites: Cite[], reads: Array<{ repo: string; sha: string }
     const why = typeof rr.reason === "string" ? (VERIFY_REASONS[rr.reason] ?? `does not hold (${clean(rr.reason)})`) : "does not hold";
     const detail = typeof rr.detail === "string" && rr.detail !== "" ? ` — ${clean(rr.detail)}` : "";
     fail("K7", `cite \`${clean(c.repo)}:${clean(c.path)}#L${c.lines}\` ${why}${detail}`, FINDINGS_FILE);
+  });
+}
+
+/**
+ * K8 (v1.1): one POST to Studio's url-cites route with every distinct URL cite, each `{ url, quote,
+ * archive? }`; the route fetches each page through DS-16's guarded fetch and answers `{ results:
+ * [{ verdict, detail?, guard?, archive? }] }` in the same order. `holds` passes; `archived` passes,
+ * and the projection marks the cite stale (§4.5); `refuted`, `gone` and `blocked` fail K8;
+ * `unavailable` — a 5xx or a timeout — is "could not run", as is anything else the route answers.
+ */
+async function kbUrlCites(cites: UrlCite[], verifier: AlissaPoster, fail: KbFail, notes: string[]): Promise<void> {
+  const seen = new Set<string>();
+  const asked: Array<{ url: string; quote: string; archive?: string }> = [];
+  for (const c of cites) {
+    const key = JSON.stringify([c.url, c.quote, c.archive ?? null]);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    asked.push({ url: c.url, quote: c.quote, ...(c.archive === undefined ? {} : { archive: c.archive }) });
+  }
+  if (asked.length === 0) {
+    notes.push("K8: the findings cite no page");
+    return;
+  }
+  const couldNot = (why: string): void => fail("K8", `plan-lint could not run: Studio's url-cites route (POST ${URL_CITES_ROUTE}) ${why} — a cite that cannot be checked is never a pass`, FINDINGS_FILE, true);
+  let res;
+  try {
+    res = await verifier.post(URL_CITES_ROUTE, { cites: asked });
+  } catch (err) {
+    if (err instanceof AlissaUnavailable) return couldNot(`is unreachable: ${err.message}`);
+    throw err;
+  }
+  if (res.status !== 200) return couldNot(`answered ${describe(res)}`);
+  const results = (res.body as { results?: unknown } | null)?.results;
+  if (!Array.isArray(results) || results.length !== asked.length || !results.every((r) => isRecord(r) && typeof r.verdict === "string" && URL_VERDICTS.has(r.verdict))) {
+    return couldNot("answered in an unexpected shape");
+  }
+  results.forEach((r, i) => {
+    const rr = r as { verdict: string; detail?: unknown; guard?: unknown; archive?: unknown };
+    const c = asked[i] as { url: string; archive?: string };
+    const where = `URL cite \`${clean(c.url)}\``;
+    const detail = typeof rr.detail === "string" && rr.detail !== "" ? ` — ${clean(rr.detail)}` : "";
+    switch (rr.verdict) {
+      case "holds":
+        return;
+      case "archived":
+        notes.push(`K8: ${where} holds only in its archive \`${clean(typeof rr.archive === "string" ? rr.archive : c.archive)}\` — it passes, and the projection marks it stale (§4.5)`);
+        return;
+      case "refuted":
+        return fail("K8", `${where} is refuted: the page answers, and neither it nor an archive holds the quote${detail}`, FINDINGS_FILE);
+      case "gone":
+        return fail("K8", `${where} is gone (404 or 410), and no archive holds the quote${detail}`, FINDINGS_FILE);
+      case "blocked": {
+        const guard = typeof rr.guard === "string" ? ` (refused by Studio's ${clean(rr.guard)})` : "";
+        return fail("K8", `${where} is blocked${guard} — a 401, 403 or 429, a paywall, or a URL the fetch guard refuses — and no archive holds the quote; supply an archive or another source${detail}`, FINDINGS_FILE);
+      }
+      default:
+        return fail("K8", `plan-lint could not run: ${where} is unavailable (a 5xx or a timeout)${detail} — a cite that cannot be checked is never a pass`, FINDINGS_FILE, true);
+    }
   });
 }
 

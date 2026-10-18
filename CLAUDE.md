@@ -46,8 +46,11 @@ per-fleet configuration (default `<owner>/alissa-dark-factory-plans`) — never 
 `alissa-build-discovery.md` §2–§4). A discovery session writes exactly one new directory,
 `knowledge-base/<YYYY>/<MM>/<DD>/TASK-<n>/` (its task's creation day, UTC), holding `findings.md`
 and nothing else; milestone 0's design task writes exactly one `knowledge-base/assessments/*.md`
-file instead. Run `node lint/plan-lint.ts --kb <dir>` before pushing — rules K1–K7, K7 through
-Studio's verify route — and never push a finding your own run refuses. A merged finding is never
+file instead. Run `node lint/plan-lint.ts --kb <dir>` before pushing — rules K1–K8, K7 and K8
+through Studio's verify routes — and never push a finding your own run refuses. A URL cite
+(`alissa-findings/v1.1`) needs a task whose `Alissa-Sources:` is `web` or `both`, a verbatim
+`quote` and, best, an `archive` taken when the page was read. The run's last line,
+`Discovery-Review: none | light — <reasons>`, is the one classification of the finding for review. A merged finding is never
 edited: a newer finding names it in `reverifies`. A knowledge-base PR never carries a plan, and a
 plan PR never touches `knowledge-base/`.
 
