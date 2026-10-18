@@ -1,7 +1,8 @@
 // Where a plan's files come from: a directory on disk (the session's pre-push run, the fixtures)
 // or a pull request's diff read straight from git objects (the CI run). In the git mode nothing of
 // the pull request is ever written to disk or executed: every file is a blob read as data. A
-// knowledge-base finding (design alissa-build-discovery §3.4, §4.2) is read the same two ways.
+// knowledge-base finding (design alissa-build-discovery §3.4, §4.2) and an integration-check run
+// (design alissa-build-integration-check §3.4, §3.5) are read the same two ways.
 import { execFileSync } from "node:child_process";
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
@@ -132,12 +133,17 @@ export function readPlanDir(dir: string, base?: string | null): PlanSource {
   return src;
 }
 
-export type PrRead = { kind: "nothing"; changed: string[] } | { kind: "plan"; source: PlanSource } | { kind: "kb"; source: KbSource };
+export type PrRead =
+  | { kind: "nothing"; changed: string[] }
+  | { kind: "plan"; source: PlanSource }
+  | { kind: "kb"; source: KbSource }
+  | { kind: "ic"; source: IcSource };
 
 /**
  * The pull-request mode: what `head` changed against its merge base with `base`, read from the
- * object database of `repo`. Only `plans/**` and `knowledge-base/**` blobs are ever read, and only
- * as text. Any `knowledge-base/**` change selects the knowledge-base mode — never "nothing to lint".
+ * object database of `repo`. Only `plans/**`, `knowledge-base/**` and `integration-check/**` blobs
+ * are ever read, and only as data. Any `integration-check/**` change selects the integration-check
+ * mode, and otherwise any `knowledge-base/**` change the knowledge-base mode — never "nothing to lint".
  */
 export function readPlanFromGit(repo: string, base: string, head: string): PrRead {
   assertRev(base, "--base");
@@ -150,6 +156,7 @@ export function readPlanFromGit(repo: string, base: string, head: string): PrRea
   const changes: Array<{ status: string; path: string }> = [];
   for (let i = 0; i + 1 < parts.length; i += 2) changes.push({ status: parts[i] ?? "", path: parts[i + 1] ?? "" });
 
+  if (changes.some((c) => c.path.startsWith(`${IC_ROOT}/`))) return { kind: "ic", source: readIcChanges(repo, base, head, changes) };
   if (changes.some((c) => c.path.startsWith(`${KB_ROOT}/`))) return { kind: "kb", source: readKbChanges(repo, base, head, changes) };
 
   const planChanges = changes.filter((c) => c.path.startsWith("plans/"));
@@ -412,6 +419,192 @@ export function readKbDir(path: string, base?: string | null): KbSource {
   if (!gitOk(where, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`])) throw new UsageError(`--base ${ref} does not resolve to a commit`);
   if (gitOk(where, ["cat-file", "-e", `${ref}:${repoPath}`])) {
     src.layout.push(`\`${repoPath}\` already exists on the base branch (${ref}) — a merged ${src.kind === "findings" ? "finding" : "assessment"} is never edited (§4.2)`);
+  }
+  return src;
+}
+
+// ── The integration check (design alissa-build-integration-check §3.4, §3.5 I1) ───────────────────
+
+export const IC_ROOT = "integration-check";
+/** `<YYYY>/<MM>/<DD>/<milestone>` under `integration-check/`: the run's start day (UTC) and its milestone. */
+export const IC_DIR_RE = /^integration-check\/([0-9]{4})\/([0-9]{2})\/([0-9]{2})\/([^/]+)$/;
+/** `<project-slug>-m<n>`, the slug at most 32 characters, and `-r<k>` for a same-day re-run (§3.4, Q1). */
+export const IC_MILESTONE_RE = /^([a-z0-9][a-z0-9-]{0,31})-m(0|[1-9][0-9]*)(?:-r([2-9]|[1-9][0-9]+))?$/;
+export const REPORT_FILE = "report.md";
+export const EVIDENCE_DIR = "evidence";
+/** Evidence types read as text (I8 scans them); the rest of I7's types are binary and only sized. */
+export const IC_TEXT_TYPES = ["log", "txt", "json", "yml"] as const;
+/** The largest evidence file I7 admits (2 MB); a text file up to it is read for I8. */
+export const IC_TEXT_READ_CAP = 2 * 1024 * 1024;
+
+export interface IcSource {
+  /** `integration-check/<YYYY>/<MM>/<DD>/<milestone>`; the given path in the directory mode. */
+  label: string;
+  /** The run directory's day, `YYYY-MM-DD`; `null` when the layout does not name one. */
+  day: string | null;
+  /** The `m<n>` of the directory's `<milestone>`; `null` when the layout does not name one. */
+  milestoneN: number | null;
+  /** Readable text files, keyed by their path inside the run directory (`report.md`, `evidence/<file>`). */
+  files: Map<string, string>;
+  /** Byte size of every regular file found (`report.md`, `evidence/**`). */
+  sizes: Map<string, number>;
+  /** I1 findings made while reading the layout. */
+  layout: string[];
+  notes: string[];
+}
+
+function emptyIc(label: string): IcSource {
+  return { label, day: null, milestoneN: null, files: new Map(), sizes: new Map(), layout: [], notes: [] };
+}
+
+export function isTextEvidence(rel: string): boolean {
+  const ext = /\.([^./]+)$/.exec(rel)?.[1];
+  return ext !== undefined && (IC_TEXT_TYPES as readonly string[]).includes(ext);
+}
+
+/** I1 over a run directory's repository path; fills `day` and `milestoneN` when they are well formed. */
+function checkIcDir(dir: string, src: IcSource): void {
+  const m = IC_DIR_RE.exec(dir);
+  if (!m) {
+    src.layout.push(`\`${dir}\` is not \`integration-check/<YYYY>/<MM>/<DD>/<milestone>\` — a run is one dated directory per milestone (§3.4)`);
+    return;
+  }
+  const [, y, mo, d, name] = m as unknown as [string, string, string, string, string];
+  if (!realDay(y, mo, d)) src.layout.push(`\`${dir}\` does not name a real calendar date`);
+  else src.day = `${y}-${mo}-${d}`;
+  const mm = IC_MILESTONE_RE.exec(name);
+  if (!mm) src.layout.push(`\`${name}\` is not \`<project-slug>-m<n>\` (slug \`[a-z0-9-]{1,32}\`, \`-r<k>\` for a same-day re-run, §3.4)`);
+  else src.milestoneN = Number(mm[2]);
+}
+
+/** Is `rel` (inside the run directory) a file the run may hold: `report.md` or `evidence/<path>`? */
+function icMember(rel: string): boolean {
+  return rel === REPORT_FILE || (rel.startsWith(`${EVIDENCE_DIR}/`) && rel.length > EVIDENCE_DIR.length + 1);
+}
+
+/**
+ * I1 on a pull request: the diff adds exactly one new `integration-check/<YYYY>/<MM>/<DD>/<milestone>/`
+ * directory holding `report.md` and `evidence/**`, and nothing else — a mix with `plans/**` or
+ * `knowledge-base/**` included.
+ */
+function readIcChanges(repo: string, base: string, head: string, changes: Array<{ status: string; path: string }>): IcSource {
+  const icChanges = changes.filter((c) => c.path.startsWith(`${IC_ROOT}/`));
+  const layout: string[] = [];
+  for (const c of changes.filter((x) => !x.path.startsWith(`${IC_ROOT}/`))) {
+    layout.push(
+      c.path.startsWith("plans/") ? `the diff touches \`${c.path}\` — an integration-check PR never carries a plan`
+      : c.path.startsWith(`${KB_ROOT}/`) ? `the diff touches \`${c.path}\` — an integration-check PR never carries a finding`
+      : `the diff touches \`${c.path}\` outside \`${IC_ROOT}/\` — an integration-check PR touches its one new run directory and nothing else`,
+    );
+  }
+  const dirs = new Set<string>();
+  for (const c of icChanges) {
+    const segs = c.path.split("/");
+    if (segs.length < 6) layout.push(`the diff touches \`${c.path}\` — a run lives in \`${IC_ROOT}/<YYYY>/<MM>/<DD>/<milestone>/\``);
+    else dirs.add(segs.slice(0, 5).join("/"));
+  }
+  if (dirs.size !== 1) {
+    if (dirs.size > 1) layout.push(`the diff touches ${dirs.size} integration-check directories (${[...dirs].sort().map((d) => `\`${d}\``).join(", ")}) — exactly one per PR`);
+    const src = emptyIc(`${IC_ROOT}/`);
+    src.layout.push(...layout);
+    return src;
+  }
+  const dir = [...dirs][0] as string;
+  const src = emptyIc(dir);
+  src.layout.push(...layout);
+  checkIcDir(dir, src);
+  if (git(repo, ["ls-tree", base, "--", dir]).length > 0) {
+    src.layout.push(`\`${dir}\` already exists on the base branch — a merged run is never edited (§3.4); a new run is a new directory that names it in \`previous\``);
+  }
+  for (const c of icChanges) {
+    if (c.status !== "A") src.layout.push(`\`${c.path}\` is ${statusWord(c.status)} — an integration-check PR only adds files`);
+  }
+  const tree = git(repo, ["ls-tree", "-r", "-z", "--full-tree", head, "--", `${dir}/`]).toString("utf8");
+  for (const rec of tree.split("\0").filter((r) => r !== "")) {
+    const m = /^(\d{6}) (\w+) ([0-9a-f]+)\t(.*)$/s.exec(rec);
+    if (!m) continue;
+    const [, mode, type, sha, path] = m as unknown as [string, string, string, string, string];
+    const rel = path.slice(`${dir}/`.length);
+    if (type !== "blob" || (mode !== "100644" && mode !== "100755")) {
+      src.layout.push(`\`${rel}\` is ${mode === "120000" ? "a symbolic link" : type === "commit" ? "a submodule" : `mode ${mode}`} — a run holds regular files only`);
+      continue;
+    }
+    if (!icMember(rel)) {
+      src.layout.push(`\`${rel}\` does not belong in a run directory — it holds \`${REPORT_FILE}\` and \`${EVIDENCE_DIR}/**\`, nothing else`);
+      continue;
+    }
+    const size = Number(git(repo, ["cat-file", "-s", sha]).toString("utf8").trim());
+    src.sizes.set(rel, size);
+    const cap = rel === REPORT_FILE ? READ_CAP_BYTES : isTextEvidence(rel) ? IC_TEXT_READ_CAP : -1;
+    if (size <= cap) src.files.set(rel, git(repo, ["cat-file", "blob", sha]).toString("utf8"));
+  }
+  if (!src.sizes.has(REPORT_FILE)) src.layout.push(`\`${REPORT_FILE}\` is missing`);
+  return src;
+}
+
+/**
+ * The directory mode for `--ic <dir>`: one run directory (`…/integration-check/<YYYY>/<MM>/<DD>/
+ * <milestone>/`), named by the path's last segments wherever the checkout lives. `base` works as
+ * `readPlanDir`'s does.
+ */
+export function readIcDir(path: string, base?: string | null): IcSource {
+  const abs = resolve(path);
+  let st;
+  try {
+    st = lstatSync(abs);
+  } catch {
+    throw new UsageError(`${path}: no such directory`);
+  }
+  if (!st.isDirectory()) throw new UsageError(`${path}: --ic takes an integration-check/<YYYY>/<MM>/<DD>/<milestone>/ directory`);
+  const repoPath = abs.split(sep).slice(-5).join("/");
+  const src = emptyIc(path.replace(/\/+$/, ""));
+  checkIcDir(repoPath, src);
+
+  const walk = (full: string, rel: string): void => {
+    for (const name of readdirSync(full).sort()) {
+      const f = join(full, name);
+      const r = rel === "" ? name : `${rel}/${name}`;
+      const entry = lstatSync(f);
+      if (entry.isSymbolicLink()) src.layout.push(`\`${r}\` is a symbolic link — a run holds regular files only`);
+      else if (entry.isDirectory() && (r === EVIDENCE_DIR || r.startsWith(`${EVIDENCE_DIR}/`))) walk(f, r);
+      else if (!entry.isFile() || !icMember(r)) src.layout.push(`\`${r}\` does not belong in a run directory — it holds \`${REPORT_FILE}\` and \`${EVIDENCE_DIR}/**\`, nothing else`);
+      else {
+        src.sizes.set(r, entry.size);
+        const cap = r === REPORT_FILE ? READ_CAP_BYTES : isTextEvidence(r) ? IC_TEXT_READ_CAP : -1;
+        if (entry.size <= cap) src.files.set(r, readFileSync(f, "utf8"));
+      }
+    }
+  };
+  walk(abs, "");
+  if (!src.sizes.has(REPORT_FILE)) src.layout.push(`\`${REPORT_FILE}\` is missing`);
+
+  // CI lints the commit, this mode the file system: a file git will not push passes here and fails there.
+  const inRepo = gitOk(abs, ["rev-parse", "--is-inside-work-tree"]);
+  if (inRepo) {
+    const others = (ignored: boolean): string[] =>
+      git(abs, ["ls-files", "-z", "--others", "--exclude-standard", ...(ignored ? ["--ignored"] : []), "--", "."])
+        .toString("utf8")
+        .split("\0")
+        .filter((r) => r !== "");
+    for (const r of others(true)) src.layout.push(`\`${r}\` is ignored by git, so it never reaches the commit CI lints — commit it with \`git add -f\` or un-ignore it`);
+    for (const r of others(false)) src.notes.push(`\`${r}\` is not tracked by git yet — stage it before pushing`);
+  }
+
+  if (base === null) {
+    src.notes.push("immutability not checked (--no-base)");
+    return src;
+  }
+  let ref = base;
+  if (ref === undefined && inRepo && gitOk(abs, ["rev-parse", "--verify", "--quiet", "refs/remotes/origin/HEAD"])) ref = "refs/remotes/origin/HEAD";
+  if (ref === undefined) {
+    src.notes.push("immutability not checked: no base branch found (pass --base <ref>)");
+    return src;
+  }
+  assertRev(ref, "--base");
+  if (!inRepo) throw new UsageError(`${path} is not inside a git work tree, so --base cannot be read`);
+  if (!gitOk(abs, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`])) throw new UsageError(`--base ${ref} does not resolve to a commit`);
+  if (gitOk(abs, ["cat-file", "-e", `${ref}:${repoPath}`])) {
+    src.layout.push(`\`${repoPath}\` already exists on the base branch (${ref}) — a merged run is never edited (§3.4)`);
   }
   return src;
 }

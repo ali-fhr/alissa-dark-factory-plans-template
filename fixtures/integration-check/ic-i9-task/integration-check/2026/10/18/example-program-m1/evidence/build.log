@@ -1,0 +1,6 @@
+$ npm ci
+added 412 packages in 11s
+$ npm run build
+> service-b@2.0.0 build
+> tsc -p .
+build finished in 6.2s

@@ -1,6 +1,8 @@
-plan-lint-template: 2026-10-13
-modes: plan knowledge-base
+plan-lint-template: 2026-10-18
+modes: plan knowledge-base integration-check
 task-schema: 1.2
 findings-schema: alissa-findings/v1
 kb-rules: K1 K2 K3 K4 K5 K6 K7
 kb-deny-list: rcf1-0ebb8c65
+ic-schema: alissa-integration-check/v1
+ic-rules: I1 I2 I3 I4 I5 I6 I7 I8 I9

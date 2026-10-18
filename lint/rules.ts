@@ -10,7 +10,7 @@ import { charLength, level2Sections, listItems, parseFrontmatter, splitFrontmatt
 import {
   DAG_BEGIN, DAG_END, SUMMARY_BEGIN, SUMMARY_END, isRecord, oneLine, readRegion, renderDag, renderSummary, taskView, type TaskView,
 } from "./render.ts";
-import { FINDINGS_FILE, type KbSource, type PlanSource, isTaskPath } from "./source.ts";
+import { EVIDENCE_DIR, FINDINGS_FILE, type IcSource, type KbSource, type PlanSource, REPORT_FILE, isTaskPath } from "./source.ts";
 
 /** A §5.5 rule number, or `5b` — the scope-path preflight, which runs with the online rules. */
 export type RuleId = number | "5b";
@@ -1052,5 +1052,354 @@ async function kbCites(cites: Cite[], reads: Array<{ repo: string; sha: string }
 }
 
 function sortKb(f: KbFailure[]): KbFailure[] {
+  return f.map((x, i) => ({ x, i })).sort((a, b) => Number(a.x.rule.slice(1)) - Number(b.x.rule.slice(1)) || a.i - b.i).map(({ x }) => x);
+}
+
+// ── The integration-check mode: I1–I9 (design alissa-build-integration-check §3.5) ───────────────
+// A pull request that changes any `integration-check/**` file is linted under these rules, numbered
+// apart from §5.5's and the K rules. I1, I2 and I4–I8 need no network; I3 reads the milestone's
+// criteria and I9 the task, both with the lint token. Every rule runs; the verdict is the first
+// failure. Alissa unavailable is "plan-lint could not run" — a failure, never a pass.
+
+export type IRule = "I1" | "I2" | "I3" | "I4" | "I5" | "I6" | "I7" | "I8" | "I9";
+
+export const I_RULE_NAMES: Readonly<Record<IRule, string>> = {
+  I1: "layout and immutability",
+  I2: "frontmatter",
+  I3: "every criterion has a verdict",
+  I4: "every verdict cites evidence that exists",
+  I5: "every unverified item is honest",
+  I6: "the status follows the rules",
+  I7: "size and types",
+  I8: "hygiene",
+  I9: "task",
+};
+
+/** I7's caps (§3.5). */
+export const IC_LIMITS = {
+  reportBytes: 48 * 1024,
+  evidenceFilesMax: 60,
+  evidenceBytesMax: 25 * 1024 * 1024,
+  evidenceFileBytes: 2 * 1024 * 1024,
+} as const;
+
+/** I7: the evidence types a run may hold. */
+export const IC_EVIDENCE_TYPES = ["png", "jpg", "webp", "log", "txt", "json", "yml"] as const;
+
+/** §5.2: a variable name — what a `notes` entry is, and all it is (I8). */
+export const NOTE_NAME_RE = /^[A-Z][A-Z0-9_]{1,63}$/;
+
+export const COULDNT_VERIFY_HEADING = "Couldn't verify";
+
+export type Verdict = "pass" | "fail" | "unverified" | "skipped";
+export type IntegrationStatus = "SUCCESS" | "UNCERTAIN" | "FAILED";
+export interface IcFailureDetail {
+  what: string;
+  suggestedFix: string;
+  paths: string[];
+}
+
+/** §3.4's frontmatter, as far as the rules read it (the schema holds the whole shape). */
+export interface IntegrationReport {
+  schema: "alissa-integration-check/v1";
+  task: string;
+  check: string;
+  project: string;
+  milestone: { id: string; n: number; title: string };
+  run: number;
+  previous: string | null;
+  notes: string[];
+  reads: Array<{ repo: string; sha: string }>;
+  recipe: Array<{ repo: string; state: "confirmed" | "draft" | "none"; path: string }>;
+  status: IntegrationStatus;
+  couldntVerify: Array<{ id: string; kind: string; what: string; why?: string; howToCheck?: string; criterion?: string }>;
+  steps: Array<{ id: "build" | "tests" | "start" | "routes" | "screens" | "contracts"; verdict: Verdict; evidence: string[]; detail: string }>;
+  criteria: Array<{ id: string; verdict: Verdict; evidence: string[]; detail: string; failure?: IcFailureDetail; unverified?: string }>;
+  neighbours: Array<{ id: string; kind: "route" | "screen"; target: string; verdict: Verdict; evidence: string[]; detail: string; failure?: IcFailureDetail }>;
+  scope: { prs: string[]; paths: string[]; oneHop: string[]; contracts: string[]; cut: string[] };
+}
+
+/**
+ * §4.1's rules, verbatim. Studio's `convex/core/integrationReport.ts` (IC-2) is the one place they
+ * live; this is I6's mirror of it, and `lint/test/ic.test.ts` pins the two together.
+ */
+export function statusOf(r: IntegrationReport): "SUCCESS" | "UNCERTAIN" | "FAILED" {
+  const verdicts = [...r.steps, ...r.criteria, ...r.neighbours].map((x) => x.verdict);
+  if (verdicts.includes("fail")) return "FAILED";
+  const started = r.steps.find((s) => s.id === "start")?.verdict === "pass";
+  if (!started || r.criteria.some((c) => c.verdict !== "pass")) return "UNCERTAIN";
+  return "SUCCESS";
+}
+
+export interface IcFailure {
+  rule: IRule;
+  file?: string;
+  message: string;
+  /** The check could not be made (Alissa unavailable): reported as "plan-lint could not run". */
+  couldNotRun?: boolean;
+}
+
+export interface IcLintResult {
+  target: string;
+  /** The report's declared status, when its frontmatter validates. */
+  status: IntegrationStatus | null;
+  criteriaCount: number;
+  failures: IcFailure[];
+  rulesRun: IRule[];
+  notes: string[];
+}
+
+/** `reader` reads the milestone (I3) and the task (I9); `prTask` is the PR's own `TASK-<n>` (I2). */
+export type IcLintOptions = { online: false; prTask?: string | null } | { online: true; reader: AlissaReader; prTask?: string | null };
+
+let reportValidator: ValidateFunction | null = null;
+
+export function integrationCheckSchema(): ValidateFunction {
+  if (!reportValidator) {
+    const ajv = new Ajv({ allErrors: true, strict: true, strictTypes: false });
+    reportValidator = ajv.compile(JSON.parse(readFileSync(new URL("../schema/integration-check.v1.json", import.meta.url), "utf8")) as object);
+  }
+  return reportValidator;
+}
+
+type IcFail = (rule: IRule, message: string, file?: string, couldNotRun?: boolean) => void;
+
+const OFFLINE_I_RULES: IRule[] = ["I1", "I2", "I4", "I5", "I6", "I7", "I8"];
+const ALL_I_RULES: IRule[] = ["I1", "I2", "I3", "I4", "I5", "I6", "I7", "I8", "I9"];
+
+export async function lintIc(src: IcSource, opts: IcLintOptions): Promise<IcLintResult> {
+  const failures: IcFailure[] = [];
+  const notes = [...src.notes];
+  const fail: IcFail = (rule, message, file, couldNotRun = false) => {
+    failures.push({ rule, message, ...(file === undefined ? {} : { file }), ...(couldNotRun ? { couldNotRun } : {}) });
+  };
+  let fm: IntegrationReport | null = null;
+  const result = (rulesRun: IRule[]): IcLintResult => ({
+    target: src.label, status: fm?.status ?? null, criteriaCount: fm?.criteria.length ?? 0, failures: sortIc(failures), rulesRun, notes,
+  });
+
+  // I1 — layout and immutability (found by the reader).
+  for (const m of src.layout) fail("I1", m);
+
+  // I7 — size and types, over every file the run holds.
+  const reportBytes = src.sizes.get(REPORT_FILE);
+  if (reportBytes !== undefined && reportBytes > IC_LIMITS.reportBytes) fail("I7", `report.md is ${reportBytes} bytes; the limit is ${IC_LIMITS.reportBytes} (§3.5)`, REPORT_FILE);
+  const evidence = [...src.sizes.entries()].filter(([rel]) => rel.startsWith(`${EVIDENCE_DIR}/`));
+  if (evidence.length > IC_LIMITS.evidenceFilesMax) fail("I7", `the run holds ${evidence.length} evidence files; at most ${IC_LIMITS.evidenceFilesMax} (§3.5)`);
+  const total = evidence.reduce((n, [, size]) => n + size, 0);
+  if (total > IC_LIMITS.evidenceBytesMax) fail("I7", `the evidence is ${total} bytes in all; at most ${IC_LIMITS.evidenceBytesMax} (§3.5)`);
+  for (const [rel, size] of evidence) {
+    if (size > IC_LIMITS.evidenceFileBytes) fail("I7", `is ${size} bytes; an evidence file is at most ${IC_LIMITS.evidenceFileBytes} (§3.5)`, rel);
+    const ext = /\.([^./]+)$/.exec(rel)?.[1];
+    if (ext === undefined || !(IC_EVIDENCE_TYPES as readonly string[]).includes(ext)) {
+      fail("I7", `is ${ext === undefined ? "a file with no type" : `a \`.${clean(ext)}\` file`} — evidence is ${IC_EVIDENCE_TYPES.join(", ")} only (§3.5)`, rel);
+    }
+  }
+
+  // I8 — hygiene, part one: no secret-shaped text in the report or a text evidence file.
+  for (const [rel, text] of src.files) {
+    const lines = secretShapedLines(text);
+    if (lines.length > 0) fail("I8", `secret-shaped text on line(s) ${lines.join(", ")} — K5's token shapes (§9)`, rel);
+  }
+
+  const text = src.files.get(REPORT_FILE);
+  if (text === undefined) {
+    notes.push("I2–I6 and I9 not run: no readable report.md");
+    return result(["I1", "I7", "I8"]);
+  }
+
+  // I2 — frontmatter.
+  let body: string | null = null;
+  let i2 = 0;
+  const i2fail = (m: string): void => {
+    fail("I2", m, REPORT_FILE);
+    i2++;
+  };
+  const split = splitFrontmatter(text);
+  if (!split.ok) i2fail(`report.md ${split.error}`);
+  else {
+    body = split.body;
+    const parsed = parseFrontmatter(split.frontmatter);
+    if (!parsed.ok) i2fail(parsed.error);
+    else {
+      const validate = integrationCheckSchema();
+      if (!validate(parsed.value)) {
+        for (const e of validate.errors ?? []) {
+          if (e.keyword === "type" && /\/sha$/.test(e.instancePath)) i2fail(`frontmatter ${ajvMessage(e)} — YAML reads an all-digit value as a number; quote it`);
+          else i2fail(`frontmatter ${ajvMessage(e)}`);
+        }
+      }
+      if (i2 === 0) fm = parsed.value as IntegrationReport;
+    }
+  }
+  if (fm) {
+    const r = fm;
+    const task = opts.prTask ?? null;
+    if (task === null) notes.push("I2: the report's `task` not checked against the branch's (no `TASK-<n>-…` branch or --task)");
+    else if (r.task !== task) i2fail(`\`task\` is \`${clean(r.task)}\` but the pull request's branch is \`${task}\``);
+    if (src.milestoneN !== null && r.milestone.n !== src.milestoneN) i2fail(`\`milestone.n\` is ${r.milestone.n} but the directory names \`m${src.milestoneN}\``);
+    const repeated = (what: string, ids: string[]): void => {
+      const seen = new Set<string>();
+      for (const id of ids) {
+        if (seen.has(id)) i2fail(`${what} \`${clean(id)}\` appears twice`);
+        seen.add(id);
+      }
+    };
+    repeated("`reads` repository", r.reads.map((x) => x.repo.toLowerCase()));
+    repeated("`recipe` repository", r.recipe.map((x) => x.repo.toLowerCase()));
+    repeated("Couldn't verify id", r.couldntVerify.map((x) => x.id));
+    repeated("step id", r.steps.map((x) => x.id));
+    repeated("criterion id", r.criteria.map((x) => x.id));
+    repeated("neighbour id", r.neighbours.map((x) => x.id));
+    if (i2 > 0) fm = null;
+  }
+
+  // I8 — hygiene, part two: `notes` keeps variable names only (§5.2).
+  if (fm) {
+    for (const [i, n] of fm.notes.entries()) {
+      if (!NOTE_NAME_RE.test(n)) fail("I8", `\`notes[${i}]\` is not a variable name (\`^[A-Z][A-Z0-9_]{1,63}$\`) — notes name variables, never values (§5.2)`, REPORT_FILE);
+    }
+  }
+
+  if (fm) {
+    icEvidence(fm, src, fail);
+    icUnverified(fm, body ?? "", fail);
+    icStatus(fm, fail);
+  } else notes.push("I3–I6 and I9 not evaluated: the frontmatter is not valid (I2)");
+
+  if (!opts.online) {
+    notes.push("I3 and I9 not run (offline)");
+    return result(OFFLINE_I_RULES);
+  }
+  if (fm) {
+    await icCriteria(fm, opts.reader, fail);
+    await icTask(fm, opts.reader, fail);
+  }
+  return result(ALL_I_RULES);
+}
+
+/** Everything that carries a verdict: a step, a criterion, a neighbour. */
+function verdicts(r: IntegrationReport): Array<{ where: string; verdict: Verdict; evidence: string[] }> {
+  return [
+    ...r.steps.map((s) => ({ where: `step \`${s.id}\``, verdict: s.verdict, evidence: s.evidence })),
+    ...r.criteria.map((c) => ({ where: `criterion \`${clean(c.id)}\``, verdict: c.verdict, evidence: c.evidence })),
+    ...r.neighbours.map((n) => ({ where: `neighbour \`${clean(n.id)}\``, verdict: n.verdict, evidence: n.evidence })),
+  ];
+}
+
+/** I4: a `pass` or `fail` cites evidence; every cite is a file under the run's `evidence/`; every evidence file is cited. */
+function icEvidence(r: IntegrationReport, src: IcSource, fail: IcFail): void {
+  const files = new Set([...src.sizes.keys()].filter((rel) => rel.startsWith(`${EVIDENCE_DIR}/`)));
+  const cited = new Set<string>();
+  const check = (where: string, path: string): void => {
+    cited.add(path);
+    if (!path.startsWith(`${EVIDENCE_DIR}/`)) fail("I4", `${where} cites \`${clean(path)}\`, which is not under the run's \`${EVIDENCE_DIR}/\``, REPORT_FILE);
+    else if (!files.has(path)) fail("I4", `${where} cites \`${clean(path)}\`, which is not a file of the run`, REPORT_FILE);
+  };
+  for (const v of verdicts(r)) {
+    if ((v.verdict === "pass" || v.verdict === "fail") && v.evidence.length === 0) fail("I4", `${v.where} is \`${v.verdict}\` but cites no evidence`, REPORT_FILE);
+    for (const e of v.evidence) check(v.where, e);
+  }
+  for (const rc of r.recipe) {
+    if (rc.state === "draft") check(`the draft recipe of \`${clean(rc.repo)}\``, rc.path);
+    else if (rc.path.startsWith(`${EVIDENCE_DIR}/`)) check(`the recipe of \`${clean(rc.repo)}\``, rc.path);
+  }
+  for (const f of [...files].sort()) {
+    if (!cited.has(f)) fail("I4", `\`${f}\` is cited by no verdict, step, item or recipe — evidence that nothing cites does not belong in the run`, f);
+  }
+}
+
+/** I5: every `unverified` has its Couldn't verify item; every item says why and how to check; the body opens with the list. */
+function icUnverified(r: IntegrationReport, body: string, fail: IcFail): void {
+  const items = new Map(r.couldntVerify.map((u) => [u.id, u]));
+  const criteria = new Set(r.criteria.map((c) => c.id));
+  for (const u of r.couldntVerify) {
+    const has = (k: "why" | "howToCheck"): boolean => typeof u[k] === "string" && (u[k] as string).trim() !== "";
+    if (!has("why")) fail("I5", `Couldn't verify item \`${u.id}\` gives no \`why\` — why the fleet could not check it`, REPORT_FILE);
+    if (!has("howToCheck")) fail("I5", `Couldn't verify item \`${u.id}\` gives no \`howToCheck\` — how the user can check it`, REPORT_FILE);
+    if (u.criterion !== undefined && !criteria.has(u.criterion)) fail("I5", `Couldn't verify item \`${u.id}\` names criterion \`${clean(u.criterion)}\`, which the report gives no verdict`, REPORT_FILE);
+  }
+  for (const c of r.criteria) {
+    if (c.unverified !== undefined && !items.has(c.unverified)) fail("I5", `criterion \`${clean(c.id)}\` names Couldn't verify item \`${c.unverified}\`, which the report does not list`, REPORT_FILE);
+    if (c.verdict !== "unverified") continue;
+    const linked = (c.unverified !== undefined && items.has(c.unverified)) || r.couldntVerify.some((u) => u.criterion === c.id);
+    if (!linked) fail("I5", `criterion \`${clean(c.id)}\` is \`unverified\` but no Couldn't verify item names it (its \`unverified\`, or an item's \`criterion\`)`, REPORT_FILE);
+  }
+  if (r.couldntVerify.length === 0) {
+    for (const v of verdicts(r).filter((x) => x.verdict === "unverified" && !x.where.startsWith("criterion"))) {
+      fail("I5", `${v.where} is \`unverified\` but the Couldn't verify list is empty`, REPORT_FILE);
+    }
+  }
+  const first = level2Sections(body).sections[0];
+  if (first?.title !== COULDNT_VERIFY_HEADING) {
+    fail("I5", `the body's first section is ${first ? `\`## ${clean(first.title)}\`` : "missing"} — every report opens with \`## ${COULDNT_VERIFY_HEADING}\` (§4.5)`, REPORT_FILE);
+  }
+}
+
+/** I6: the declared status is statusOf's, and every `fail` says what failed. */
+function icStatus(r: IntegrationReport, fail: IcFail): void {
+  const want = statusOf(r);
+  if (r.status !== want) fail("I6", `\`status\` is \`${r.status}\` but the verdicts make it \`${want}\` (statusOf, §4.1)`, REPORT_FILE);
+  for (const x of [...r.criteria.map((c) => ({ where: `criterion \`${clean(c.id)}\``, ...c })), ...r.neighbours.map((n) => ({ where: `neighbour \`${clean(n.id)}\``, ...n }))]) {
+    if (x.verdict === "fail" && x.failure === undefined) fail("I6", `${x.where} is \`fail\` but carries no \`failure\` (what happened, a suggested fix, the paths)`, REPORT_FILE);
+  }
+}
+
+/** I3: one verdict for each of the milestone's criteria, none for a criterion it does not have. */
+async function icCriteria(r: IntegrationReport, reader: AlissaReader, fail: IcFail): Promise<void> {
+  let res;
+  try {
+    res = await reader.get(`/v1/projects/${encodeURIComponent(r.project)}`);
+  } catch (err) {
+    if (err instanceof AlissaUnavailable) return fail("I3", `plan-lint could not run: could not read project \`${r.project}\`: ${err.message}`, REPORT_FILE, true);
+    throw err;
+  }
+  if (res.status === 404) return fail("I3", `project \`${r.project}\` does not resolve (${describe(res)})`, REPORT_FILE);
+  if (res.status !== 200) return fail("I3", `plan-lint could not run: could not read project \`${r.project}\`: ${describe(res)}`, REPORT_FILE, true);
+  const project = (res.body as { project?: Record<string, unknown> } | null)?.project ?? {};
+  const milestones = (Array.isArray(project.milestones) ? project.milestones : []).filter(isRecord);
+  const m = milestones.find((x) => x._id === r.milestone.id || x.bodyOfWorkId === r.milestone.id);
+  if (!m) return fail("I3", `milestone \`${r.milestone.id}\` is not a milestone of project \`${r.project}\``, REPORT_FILE);
+  const want = (Array.isArray(m.validationCriteria) ? m.validationCriteria : []).filter(isRecord).map((c) => c.id).filter((id): id is string => typeof id === "string");
+  const got = r.criteria.map((c) => c.id);
+  for (const id of want) {
+    const n = got.filter((g) => g === id).length;
+    if (n === 0) fail("I3", `the milestone's criterion \`${clean(id)}\` has no verdict`, REPORT_FILE);
+    else if (n > 1) fail("I3", `the milestone's criterion \`${clean(id)}\` has ${n} verdicts — exactly one each`, REPORT_FILE);
+  }
+  for (const id of new Set(got)) {
+    if (!want.includes(id)) fail("I3", `a verdict for criterion \`${clean(id)}\`, which milestone \`${r.milestone.id}\` does not have`, REPORT_FILE);
+  }
+}
+
+/** I9: the task resolves, is an integration check, and its Alissa-Reads lines are exactly `reads`. */
+async function icTask(r: IntegrationReport, reader: AlissaReader, fail: IcFail): Promise<void> {
+  let res;
+  try {
+    res = await reader.get(`/v1/tasks/${encodeURIComponent(r.task)}?view=full`);
+  } catch (err) {
+    if (err instanceof AlissaUnavailable) return fail("I9", `plan-lint could not run: could not read \`${r.task}\`: ${err.message}`, REPORT_FILE, true);
+    throw err;
+  }
+  if (res.status === 404) return fail("I9", `\`${r.task}\` does not resolve (${describe(res)})`, REPORT_FILE);
+  if (res.status !== 200) return fail("I9", `plan-lint could not run: could not read \`${r.task}\`: ${describe(res)}`, REPORT_FILE, true);
+  const t = (res.body as { task?: Record<string, unknown> } | null)?.task ?? {};
+  if (t.kind !== "integration_check") fail("I9", `\`${r.task}\` is \`kind: ${clean(t.kind ?? "code")}\`, not \`integration_check\``, REPORT_FILE);
+  const pinned = new Map<string, string>();
+  for (const m of (typeof t.description === "string" ? t.description : "").matchAll(READS_TRAILER_RE)) pinned.set((m[1] as string).toLowerCase(), m[2] as string);
+  if (pinned.size === 0) return fail("I9", `\`${r.task}\` carries no \`Alissa-Reads: <owner>/<repo>@<sha>\` line — its pinned SHAs are unknown, so I9 refuses rather than guesses`, REPORT_FILE);
+  const declared = new Set<string>();
+  for (const rd of r.reads) {
+    declared.add(rd.repo.toLowerCase());
+    const want = pinned.get(rd.repo.toLowerCase());
+    if (want === undefined) fail("I9", `\`reads\` names \`${clean(rd.repo)}\`, which \`${r.task}\` does not read (its Alissa-Reads: ${[...pinned.keys()].join(", ")})`, REPORT_FILE);
+    else if (want !== rd.sha) fail("I9", `\`reads\` pins \`${clean(rd.repo)}\` at \`${rd.sha}\`, but \`${r.task}\`'s Alissa-Reads pins \`${want}\``, REPORT_FILE);
+  }
+  for (const repo of pinned.keys()) {
+    if (!declared.has(repo)) fail("I9", `\`${r.task}\`'s Alissa-Reads names \`${repo}\`, which \`reads\` leaves out`, REPORT_FILE);
+  }
+}
+
+function sortIc(f: IcFailure[]): IcFailure[] {
   return f.map((x, i) => ({ x, i })).sort((a, b) => Number(a.x.rule.slice(1)) - Number(b.x.rule.slice(1)) || a.i - b.i).map(({ x }) => x);
 }

@@ -5,6 +5,7 @@
 //   plan-lint --write [--offline] [--base <ref> | --no-base] <plan-dir>
 //   plan-lint --pr --base <rev> --head <rev> [--repo <path>] [--offline]
 //   plan-lint --kb <findings-dir | assessment.md> [--offline] [--base <ref> | --no-base] [--task TASK-<n>]
+//   plan-lint --ic <run-dir> [--offline] [--base <ref> | --no-base] [--task TASK-<n>]
 //
 // Rules 1–9 need no network; rules 10–12 read Alissa with ALISSA_API_TOKEN (ALISSA_BASE overrides
 // https://api.alissa.app), and rule 5b reads each task's repository on GitHub (GITHUB_TOKEN or
@@ -12,7 +13,10 @@
 // report; --check-output <path> writes { conclusion, title, summary } for a check run.
 // A pull request that changes any knowledge-base/** file is linted in the knowledge-base mode, K1–K7
 // (design alissa-build-discovery §3.4): K1–K5 offline, K6 reads the task, K7 posts the cites to
-// Studio's verify route; --kb runs the same rules over a local directory.
+// Studio's verify route; --kb runs the same rules over a local directory. A pull request that changes
+// any integration-check/** file is linted in the integration-check mode, I1–I9 (design
+// alissa-build-integration-check §3.5): I1, I2 and I4–I8 offline, I3 and I9 read Alissa; --ic runs
+// the same rules over a local run directory.
 // Exit status: 0 passed (or nothing to lint), 1 refused, 2 usage or internal error.
 import { appendFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -24,8 +28,11 @@ import { parseFrontmatter, splitFrontmatter } from "./markdown.ts";
 import {
   DAG_BEGIN, DAG_END, SUMMARY_BEGIN, SUMMARY_END, ensureMarkers, renderDag, renderSummary, taskView, writeRegion, type TaskView,
 } from "./render.ts";
-import { type KbLintOptions, type KbLintResult, K_RULE_NAMES, type LintResult, RULE_NAMES, lint, lintKb, taskOfBranch } from "./rules.ts";
-import { type PlanSource, UsageError, isTaskPath, readKbDir, readPlanDir, readPlanFromGit } from "./source.ts";
+import {
+  type IcLintOptions, type IcLintResult, I_RULE_NAMES, type KbLintOptions, type KbLintResult, K_RULE_NAMES, type LintResult, RULE_NAMES, lint, lintIc, lintKb,
+  taskOfBranch,
+} from "./rules.ts";
+import { type PlanSource, UsageError, isTaskPath, readIcDir, readKbDir, readPlanDir, readPlanFromGit } from "./source.ts";
 
 export const DEFAULT_ALISSA_BASE = "https://api.alissa.app";
 
@@ -41,7 +48,7 @@ export function nothingToLint(changed: number): Report {
   return {
     conclusion: "success",
     title,
-    summary: `**plan-lint: ${title}.** The pull request changes ${changed} file(s), none under \`plans/\` or \`knowledge-base/\`.`,
+    summary: `**plan-lint: ${title}.** The pull request changes ${changed} file(s), none under \`plans/\`, \`knowledge-base/\` or \`integration-check/\`.`,
     lines: [`plan-lint: ${title}`],
   };
 }
@@ -97,6 +104,28 @@ export function reportKb(r: KbLintResult): Report {
   return { conclusion: first ? "failure" : "success", title, summary: md.join("\n"), lines };
 }
 
+/** The integration-check mode's report. Its titles say `integration-check`, which the merge edge reads (§3.6). */
+export function reportIc(r: IcLintResult): Report {
+  const ran = r.rulesRun.length === 9 ? "I1–I9" : r.rulesRun.join(", ") === "I1, I2, I4, I5, I6, I7, I8" ? "I1, I2, I4–I8" : r.rulesRun.join(", ");
+  const head = `${r.target} — integration-check mode — status ${r.status ?? "unknown"} — ${r.criteriaCount} criteria — ${ran}`;
+  const lines = [`plan-lint: ${head}`];
+  const first = r.failures[0];
+  const fmt = (f: { rule: keyof typeof I_RULE_NAMES; file?: string; message: string }): string =>
+    `${f.rule} (${I_RULE_NAMES[f.rule]})${f.file ? ` — ${f.file}` : ""}: ${f.message}`;
+  if (first) {
+    lines.push(`plan-lint: FAIL ${fmt(first)}`);
+    for (const f of r.failures.slice(1)) lines.push(`plan-lint:   also ${fmt(f)}`);
+  } else lines.push("plan-lint: PASS");
+  for (const n of r.notes) lines.push(`plan-lint:   note: ${n}`);
+  const md = [`**plan-lint** · \`${r.target}\` · integration-check mode · status \`${r.status ?? "unknown"}\` · ${r.criteriaCount} criteria · ${ran}`, "", first ? `**FAIL — ${fmt(first)}**` : "**PASS**"];
+  if (r.failures.length > 1) md.push("", "Every finding, in rule order:", "", ...r.failures.map((f) => `- ${fmt(f)}`));
+  if (r.notes.length > 0) md.push("", "Notes:", "", ...r.notes.map((n) => `- ${n}`));
+  const title = !first ? `PASS — integration-check — ${r.target}`
+    : first.couldNotRun ? `plan-lint could not run — ${first.rule} (${I_RULE_NAMES[first.rule]}) — ${r.target}`
+    : `FAIL — ${first.rule} (${I_RULE_NAMES[first.rule]}) — integration-check — ${r.target}`;
+  return { conclusion: first ? "failure" : "success", title, summary: md.join("\n"), lines };
+}
+
 /** `--write`: render the Summary and the Dependency graph into plan.md. Returns whether it changed. */
 export function writeGenerated(src: PlanSource, dir: string): boolean {
   const views: TaskView[] = [];
@@ -128,8 +157,9 @@ const USAGE = `usage:
   plan-lint --write [--offline] [--base <ref> | --no-base] <plan-dir>
   plan-lint --pr --base <rev> --head <rev> [--repo <path>] [--offline] [--task TASK-<n>]
   plan-lint --kb <findings-dir | assessment.md> [--offline] [--base <ref> | --no-base] [--task TASK-<n>]
+  plan-lint --ic <integration-check/<YYYY>/<MM>/<DD>/<milestone>> [--offline] [--base <ref> | --no-base] [--task TASK-<n>]
 options: --summary-file <path>  --check-output <path>
-env: ALISSA_API_TOKEN (rules 10–12, K6–K7), ALISSA_BASE (default ${DEFAULT_ALISSA_BASE}),
+env: ALISSA_API_TOKEN (rules 10–12, K6–K7, I3 and I9), ALISSA_BASE (default ${DEFAULT_ALISSA_BASE}),
      GITHUB_HEAD_REF (the PR's TASK-<n>-… branch, when --task is not given),
      GITHUB_TOKEN or GH_TOKEN (rule 5b, optional), GITHUB_API_URL (default ${DEFAULT_GITHUB_API})`;
 
@@ -149,6 +179,7 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
         head: { type: "string" },
         repo: { type: "string" },
         kb: { type: "string" },
+        ic: { type: "string" },
         task: { type: "string" },
         "summary-file": { type: "string" },
         "check-output": { type: "string" },
@@ -168,11 +199,18 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
     if (values.task !== undefined && !/^TASK-[1-9][0-9]*$/.test(values.task)) throw new UsageError(`--task \`${values.task}\` is not TASK-<n>`);
     const prTask = values.task ?? taskOfBranch(env.GITHUB_HEAD_REF);
     if (values.pr) {
-      if (values.write || values.kb !== undefined || positionals.length > 0 || !values.base || !values.head) throw new UsageError("--pr takes --base and --head and no directory (and never --write or --kb)");
+      if (values.write || values.kb !== undefined || values.ic !== undefined || positionals.length > 0 || !values.base || !values.head) {
+        throw new UsageError("--pr takes --base and --head and no directory (and never --write, --kb or --ic)");
+      }
       const read = readPlanFromGit(values.repo ?? process.cwd(), values.base, values.head);
       if (read.kind === "nothing") out = nothingToLint(read.changed.length);
       else if (read.kind === "kb") out = reportKb(await lintKb(read.source, kbOptionsFor(values.offline === true, env, prTask)));
+      else if (read.kind === "ic") out = reportIc(await lintIc(read.source, icOptionsFor(values.offline === true, env, prTask)));
       else out = report(await lint(read.source, readerFor(values.offline === true, env)));
+    } else if (values.ic !== undefined) {
+      if (values.write || values.kb !== undefined || positionals.length > 0 || values.head || values.repo) throw new UsageError("--ic takes one run directory and no --write, --kb, --head, --repo or other directory");
+      const source = readIcDir(values.ic, values["no-base"] ? null : values.base);
+      out = reportIc(await lintIc(source, icOptionsFor(values.offline === true, env, prTask)));
     } else if (values.kb !== undefined) {
       if (values.write || positionals.length > 0 || values.head || values.repo) throw new UsageError("--kb takes one path and no --write, --head, --repo or other directory");
       const source = readKbDir(values.kb, values["no-base"] ? null : values.base);
@@ -218,6 +256,14 @@ function kbOptionsFor(offline: boolean, env: NodeJS.ProcessEnv, prTask: string |
   if (!token) throw new UsageError("K6–K7 need ALISSA_API_TOKEN; pass --offline to run K1–K5 only");
   const base = env.ALISSA_BASE || DEFAULT_ALISSA_BASE;
   return { online: true, reader: httpReader({ base, token }), verifier: httpPoster({ base, token }), prTask };
+}
+
+/** The integration-check mode's online half: I3 (the milestone's criteria) and I9 (the task) through the reader. */
+function icOptionsFor(offline: boolean, env: NodeJS.ProcessEnv, prTask: string | null): IcLintOptions {
+  if (offline) return { online: false, prTask };
+  const token = env.ALISSA_API_TOKEN;
+  if (!token) throw new UsageError("I3 and I9 need ALISSA_API_TOKEN; pass --offline to run I1, I2 and I4–I8 only");
+  return { online: true, reader: httpReader({ base: env.ALISSA_BASE || DEFAULT_ALISSA_BASE, token }), prTask };
 }
 
 function isMain(): boolean {

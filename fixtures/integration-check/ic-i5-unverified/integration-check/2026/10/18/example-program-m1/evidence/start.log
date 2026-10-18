@@ -1,0 +1,4 @@
+$ npm run start
+listening on 127.0.0.1:3000
+GET /health 200 3ms
+ready after 9s
