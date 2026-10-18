@@ -578,11 +578,22 @@ export function readIcDir(path: string, base?: string | null): IcSource {
   walk(abs, "");
   if (!src.sizes.has(REPORT_FILE)) src.layout.push(`\`${REPORT_FILE}\` is missing`);
 
+  // CI lints the commit, this mode the file system: a file git will not push passes here and fails there.
+  const inRepo = gitOk(abs, ["rev-parse", "--is-inside-work-tree"]);
+  if (inRepo) {
+    const others = (ignored: boolean): string[] =>
+      git(abs, ["ls-files", "-z", "--others", "--exclude-standard", ...(ignored ? ["--ignored"] : []), "--", "."])
+        .toString("utf8")
+        .split("\0")
+        .filter((r) => r !== "");
+    for (const r of others(true)) src.layout.push(`\`${r}\` is ignored by git, so it never reaches the commit CI lints — commit it with \`git add -f\` or un-ignore it`);
+    for (const r of others(false)) src.notes.push(`\`${r}\` is not tracked by git yet — stage it before pushing`);
+  }
+
   if (base === null) {
     src.notes.push("immutability not checked (--no-base)");
     return src;
   }
-  const inRepo = gitOk(abs, ["rev-parse", "--is-inside-work-tree"]);
   let ref = base;
   if (ref === undefined && inRepo && gitOk(abs, ["rev-parse", "--verify", "--quiet", "refs/remotes/origin/HEAD"])) ref = "refs/remotes/origin/HEAD";
   if (ref === undefined) {

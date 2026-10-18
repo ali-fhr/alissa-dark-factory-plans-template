@@ -1,0 +1,4 @@
+$ npm test -- test/config/load.test.ts test/config/contract.test.ts
+# tests 14
+# pass 14
+# fail 0

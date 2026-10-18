@@ -224,6 +224,20 @@ describe("--pr in the integration-check mode (c1, c3)", () => {
     assert.match(text(r.failures), /^I1 .*already exists on the base branch \(main\)/m);
   });
 
+  it("--ic refuses (I1) a run file git ignores, and notes one not yet tracked", async () => {
+    const repo = initRepo();
+    writeFileSync(join(repo, ".gitignore"), "*.log\n");
+    commitAll(repo, "ignore logs");
+    cpSync(icFixture("ic-golden"), join(repo, RUN), { recursive: true });
+    const src = readIcDir(join(repo, RUN), null);
+    assert.match(src.layout.join("\n"), /`evidence\/build\.log` is ignored by git, so it never reaches the commit CI lints/);
+    assert.match(src.notes.join("\n"), /`report\.md` is not tracked by git yet/);
+    git(repo, "add", "-f", ".");
+    const staged = readIcDir(join(repo, RUN), null);
+    assert.deepEqual(staged.layout, []);
+    assert.ok(!staged.notes.some((n) => /not tracked/.test(n)), staged.notes.join("\n"));
+  });
+
   it("I2: a report whose task is not the PR branch's is refused", async () => {
     const run = await runCli(prArgs(icPr("ic-golden")), branchEnv("TASK-3001"));
     assert.equal(run.status, 1, run.stdout);

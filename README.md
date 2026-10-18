@@ -410,6 +410,9 @@ npm run plan-lint -- --ic integration-check/2026/10/18/shop-m1 --task TASK-3000 
 - **Fail closed**, as the knowledge-base mode: when Alissa cannot be read for I3 or I9 the run
   reports **`plan-lint could not run`**, a `failure`, never a pass; without `ALISSA_API_TOKEN` the
   linter refuses to run rather than skip I3 and I9.
+- **What git will push.** CI reads the commit, while `--ic` reads the file system. So inside a
+  git work tree, `--ic` refuses (I1) any run file that git ignores, and notes any file that is
+  not tracked yet. A `*.log` ignore rule otherwise drops the run's required logs from the push.
 - **The stamp.** `lint/VERSION` reads `modes: plan knowledge-base integration-check`, with
   `ic-schema: alissa-integration-check/v1` and `ic-rules: I1 I2 I3 I4 I5 I6 I7 I8 I9`. A plans
   repository whose stamp lacks the mode reads `behind` with `modesMissing: ["integration-check"]`;
