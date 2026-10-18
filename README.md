@@ -31,16 +31,20 @@ nothing in this repository names it.
 │       ├── tasks/
 │       │   └── <id>.md                    ← one file per task, 1–8 of them (§5.2)
 │       └── materialized.json              ← written by the close edge AFTER the merge (D20)
-└── knowledge-base/                        ← discovery findings, append-only (see "The knowledge base" below)
-    ├── <YYYY>/<MM>/<DD>/TASK-<n>/         ← one discovery task: its creation day (UTC) and number
-    │   └── findings.md                    ← schema/findings.v1.json frontmatter + prose; nothing else
-    └── assessments/
-        └── <project-slug>-<yyyy-mm-dd>.md ← milestone 0's assessment, from its one design task
+├── knowledge-base/                        ← discovery findings, append-only (see "The knowledge base" below)
+│   ├── <YYYY>/<MM>/<DD>/TASK-<n>/         ← one discovery task: its creation day (UTC) and number
+│   │   └── findings.md                    ← schema/findings.v1.json frontmatter + prose; nothing else
+│   └── assessments/
+│       └── <project-slug>-<yyyy-mm-dd>.md ← milestone 0's assessment, from its one design task
+└── integration-check/                     ← integration-check reports, append-only (see "The integration check" below)
+    └── <YYYY>/<MM>/<DD>/<milestone>/      ← one run: its start day (UTC); <milestone> = <project-slug>-m<n>[-r<k>]
+        ├── report.md                      ← schema/integration-check.v1.json frontmatter + prose
+        └── evidence/                      ← logs, routes.json, screenshots; every file cited by the report
 ```
 
 The plan-lint lane (design §9 L8) adds `schema/`, `lint/`, `fixtures/`, `package.json`,
 `tsconfig.json` and `.github/workflows/plan-lint.yml` beside these; a plan PR never touches them,
-and neither does a knowledge-base PR.
+and neither does a knowledge-base or an integration-check PR.
 
 The two sections below are quoted from the design (§5.1 and §5.2 of v0.2) **without drift** —
 the plan-lint lane pins them with a test — with the single substitution of the plans repository's name.
@@ -248,9 +252,10 @@ kind: code            # optional, code | design (default code)
   are warnings by design (D12), listed under the verdict and counted in the check's title. `ALISSA_BASE` overrides
   `https://api.alissa.app`.
 - **`--pr --base <rev> --head <rev>`** is the CI mode: it lints what the pull request changed,
-  reading every file of `plans/**` and `knowledge-base/**` from git objects as data. Any
-  `knowledge-base/**` change selects the knowledge-base mode (below); otherwise a `plans/**` change
-  is a plan, and a pull request that changes neither succeeds with *nothing to lint*.
+  reading every file of `plans/**`, `knowledge-base/**` and `integration-check/**` from git objects
+  as data. Any `integration-check/**` change selects the integration-check mode (below); otherwise
+  any `knowledge-base/**` change selects the knowledge-base mode (below); otherwise a `plans/**`
+  change is a plan, and a pull request that changes none of the three succeeds with *nothing to lint*.
 
 **The workflow** (`.github/workflows/plan-lint.yml`) runs on every pull request, with no path
 filter, as two jobs split by trust. The **offline** job (`pull_request`) runs the pull request's own
@@ -259,7 +264,7 @@ The **trusted** job (`pull_request_target`) checks out the base branch only, ins
 lockfile, fetches the pull request's commits as objects, runs the base branch's linter over them
 with `ALISSA_API_TOKEN` from the `alissa-plan-lint` environment (rules 1–12), and publishes the check run
 named **`plan-lint`** on the pull request's head commit — `success` with *nothing to lint* when no
-`plans/**` or `knowledge-base/**` file changed. That check run is the run of record: the one a ruleset requires and the close edge reads (§5.5 rule 13).
+`plans/**`, `knowledge-base/**` or `integration-check/**` file changed. That check run is the run of record: the one a ruleset requires and the close edge reads (§5.5 rule 13).
 `lint/test/workflow.test.ts` pins this structure, and `lint/test/pr-mode.test.ts` shows that a
 pull request's own linter, package scripts and git drivers never run in the trusted mode.
 
@@ -267,11 +272,13 @@ pull request's own linter, package scripts and git drivers never run in the trus
 `lint/test/design.test.ts` against the design at a named commit: the plan schema byte-equal to
 §5.3, the task schema §5.3's bumped in place to **version 1.2** — v1.1's optional `kind`, optional
 `new[]` and edge type widened to `acceptance`; v1.2's `kind: discovery` branch — `$id` unchanged,
-with nothing else changed; and `findings.v1.json`, the knowledge base's), `lint/` (the linter, its
-tests and the `VERSION` stamp), `fixtures/` (a golden plan that passes, at least one plan per rule
-failing exactly that rule — `rule-<nn>[b]-<what>`, one per schema v1.1 refusal and one for rule
-5b — the Alissa and GitHub state the tests' fake APIs serve for rules 10–12 and 5b, and the
-knowledge-base cases `kb-golden`, `kb-assessment` and one `kb-k<n>-<what>` per K rule).
+with nothing else changed; `findings.v1.json`, the knowledge base's; and `integration-check.v1.json`,
+an integration-check report's), `lint/` (the linter, its tests and the `VERSION` stamp), `fixtures/`
+(a golden plan that passes, at least one plan per rule failing exactly that rule — `rule-<nn>[b]-<what>`,
+one per schema v1.1 refusal and one for rule 5b — the Alissa and GitHub state the tests' fake APIs
+serve for rules 10–12 and 5b, the knowledge-base cases `kb-golden`, `kb-assessment` and one
+`kb-k<n>-<what>` per K rule, and under `fixtures/integration-check/` the run `ic-golden` and one
+`ic-i<n>-<what>` per I rule).
 
 **Schema v1.2 — `kind: discovery`** (design `docs/design/alissa-build-discovery.md` §2.2, lane
 DS-2). A discovery task reads a code repository and writes only the knowledge base, so its task
@@ -342,6 +349,72 @@ npm run plan-lint -- --kb knowledge-base/assessments/shop-2026-10-14.md --task T
   an adopted one. Until an existing repository is upgraded — by an ordinary `TASK-` lane in that
   repository — its `knowledge-base/` pull requests still pass *nothing to lint*, which is why
   Studio reads the stamp first.
+
+## The integration check — `plan-lint`'s integration-check mode
+
+When a milestone's tasks are built, Studio feeds one `kind: integration_check` task into this
+repository (design `alissa-build-integration-check.md` §3). Its devloop session builds and starts the
+milestone's repositories at the SHAs its `Alissa-Reads:` lines pin, checks every milestone criterion
+and the moving pieces around it against the running product, and writes exactly one new directory
+here: `integration-check/<YYYY>/<MM>/<DD>/<milestone>/`, the date being the run's start day (UTC)
+and `<milestone>` `<project-slug>-m<n>` (the project's title slugified to at most 32 characters, the
+milestone's position in the chain; `-r2`, `-r3`, … for a second run the same day). It holds
+`report.md` and `evidence/**` — logs, `routes.json`, screenshots — and nothing else.
+
+`report.md`'s frontmatter validates against `schema/integration-check.v1.json` (`schema:
+alissa-integration-check/v1`, `task`, `check`, `project`, `milestone: { id, n, title }`, `run`,
+`previous`, `notes`, `reads`, `recipe`, `status`, `couldntVerify`, `steps`, `criteria`,
+`neighbours`, `scope` — §3.4). Every `evidence` entry is a path inside the run directory,
+`evidence/<file>`. The body opens with `## Couldn't verify`, then `## Summary`, `## Criteria`,
+`## Neighbours` and `## Steps`. The integration check is **append-only**: a merged run is never
+edited; a new run is a new directory whose report names the last one in `previous`, and the newest
+run is authoritative.
+
+The **status** is not the session's to choose. It follows from the verdicts — §4.1's `statusOf`,
+which `lint/rules.ts` carries verbatim and Studio recomputes on merge:
+
+```ts
+function statusOf(r: IntegrationReport): "SUCCESS" | "UNCERTAIN" | "FAILED" {
+  const verdicts = [...r.steps, ...r.criteria, ...r.neighbours].map((x) => x.verdict);
+  if (verdicts.includes("fail")) return "FAILED";
+  const started = r.steps.find((s) => s.id === "start")?.verdict === "pass";
+  if (!started || r.criteria.some((c) => c.verdict !== "pass")) return "UNCERTAIN";
+  return "SUCCESS";
+}
+```
+
+Any pull request that changes an `integration-check/**` file is linted in the **integration-check
+mode** — never *nothing to lint* — under the I rules, numbered apart from §5.5's and the K rules:
+
+| Rule | Name | Refuses | Reads |
+|---|---|---|---|
+| I1 | layout and immutability | a diff outside **one** new `integration-check/<YYYY>/<MM>/<DD>/<milestone>/` directory (a mix with `plans/**` or `knowledge-base/**` included); a directory already on the base branch; anything in it but `report.md` and `evidence/**`; a date that is not a real calendar day; a `<milestone>` that is not `<project-slug>-m<n>[-r<k>]`; a change that is not an add | git |
+| I2 | frontmatter | frontmatter that does not split, parse or validate against `schema/integration-check.v1.json`; a `task` that is not the pull request's `TASK-<n>-…` branch's (`GITHUB_HEAD_REF`, or `--task`); a `milestone.n` other than the directory's `m<n>`; a repeated id — a Couldn't verify item, a step, a criterion, a neighbour, a `reads` or `recipe` repository | — |
+| I3 | every criterion has a verdict | a milestone criterion with no verdict, or with two; a verdict for a criterion the milestone does not have — the criteria are read with the lint token, `GET /v1/projects/:id`, from the milestone whose `_id` (or body of work) is `milestone.id` | Alissa |
+| I4 | every verdict cites evidence that exists | a `pass` or `fail` with no evidence; an evidence path that is not a file under the run's `evidence/`; a draft recipe whose `path` is not one; an evidence file no verdict, step, item or recipe cites | — |
+| I5 | every unverified item is honest | an `unverified` criterion that no Couldn't verify item names (its `unverified`, or an item's `criterion`); an `unverified` step or neighbour with an empty Couldn't verify list; an item with no `why` or no `howToCheck`; an item or criterion naming one that does not exist; a body whose first section is not `## Couldn't verify` | — |
+| I6 | the status follows the rules | a `status` that is not `statusOf(report)` (§4.1); a criterion or neighbour that is `fail` with no `failure` | — |
+| I7 | size and types | `report.md` over 48 KB; more than 60 evidence files or 25 MB in all; an evidence file over 2 MB; a type outside `png`, `jpg`, `webp`, `log`, `txt`, `json`, `yml` | — |
+| I8 | hygiene | secret-shaped text in the report or a text evidence file (`log`, `txt`, `json`, `yml`) — K5's token shapes; a `notes` entry that is not a variable name, `^[A-Z][A-Z0-9_]{1,63}$` (§5.2: notes name variables, never values) | — |
+| I9 | task | a `task` that does not resolve, is not `kind: integration_check`, or whose `Alissa-Reads: <owner>/<repo>@<sha>` lines differ from `reads`, in either direction — `GET /v1/tasks/:id?view=full` with the lint token | Alissa |
+
+```sh
+npm run plan-lint -- --ic integration-check/2026/10/18/shop-m1                    # I1–I9 (I3 and I9 need ALISSA_API_TOKEN)
+npm run plan-lint -- --ic integration-check/2026/10/18/shop-m1 --offline          # I1, I2 and I4–I8, no network
+npm run plan-lint -- --ic integration-check/2026/10/18/shop-m1 --task TASK-3000   # I2 also checks the report's task
+```
+
+- **The check's title says the mode**: `PASS — integration-check — <dir>`, `FAIL — I<n> (<name>) —
+  integration-check — <dir>`, or `plan-lint could not run — I<n> (<name>) — <dir>`. orcloop's merge
+  edge merges an integration-check PR on the first of these (design §3.6).
+- **Fail closed**, as the knowledge-base mode: when Alissa cannot be read for I3 or I9 the run
+  reports **`plan-lint could not run`**, a `failure`, never a pass; without `ALISSA_API_TOKEN` the
+  linter refuses to run rather than skip I3 and I9.
+- **The stamp.** `lint/VERSION` reads `modes: plan knowledge-base integration-check`, with
+  `ic-schema: alissa-integration-check/v1` and `ic-rules: I1 I2 I3 I4 I5 I6 I7 I8 I9`. A plans
+  repository whose stamp lacks the mode reads `behind` with `modesMissing: ["integration-check"]`;
+  **Update plan-lint** brings it current, and until then Studio starts no check there (§3.5).
+  `lint/test/ic.test.ts` keeps the stamp in step with the schema and the rules.
 
 ## Identities and setup
 

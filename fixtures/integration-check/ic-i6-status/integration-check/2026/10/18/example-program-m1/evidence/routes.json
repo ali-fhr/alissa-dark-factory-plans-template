@@ -1,0 +1,20 @@
+[
+  {
+    "route": "GET /config",
+    "status": 200,
+    "ms": 12,
+    "excerpt": "{\"version\":\"2.1\",\"keys\":[\"db.url\",\"cache.ttl\"]}"
+  },
+  {
+    "route": "GET /health",
+    "status": 200,
+    "ms": 4,
+    "excerpt": "{\"ok\":true}"
+  },
+  {
+    "route": "GET /settings",
+    "status": 200,
+    "ms": 31,
+    "excerpt": "<!doctype html>"
+  }
+]
