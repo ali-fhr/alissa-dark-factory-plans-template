@@ -345,7 +345,7 @@ carry artifacts — screenshots, diagrams, small data — the way an integration
   `<foreignObject>` or XHTML namespace, no `on…=` event handler, no `href` or `src` other than a
   `#fragment`, no animation (`animate`, `set`, …) that rewrites an `href`/`src` or holds a URL, no
   `srcdoc`, no style that loads from outside the file (`url(…)`, `image-set(…)`, `@import`, a quoted
-  function argument), no backslash (CSS escape) in an attribute or style, and no character reference
+  function argument — in `style`, `<style>` or any presentation attribute), no backslash (CSS escape) in an attribute or style, and no character reference
   other than a well-formed `&#…;` or the five XML names — every check reads the text with its
   references decoded, as the parser does. Text evidence is UTF-8 (a UTF-8 BOM is fine; UTF-16,
   NUL bytes and invalid sequences are refused), so the svg and secret scans read what a viewer renders.

@@ -831,11 +831,9 @@ export function svgRefusals(text: string): string[] {
       const value = decodeRefs(a[2] ?? a[3] ?? a[4] ?? "").trim();
       if (/^on[a-z]+$/.test(local)) out.add("an event-handler attribute (`on…=`)");
       if (local === "srcdoc") out.add("a `srcdoc` attribute (an HTML document inside the svg)");
-      if (value.includes("\\")) out.add(CSS_ESCAPE);
-      if (local === "style") {
-        const why = styleRefusal(value);
-        if (why) out.add(why);
-      }
+      // Presentation attributes (`fill`, `filter`, `mask`, `cursor`, …) are CSS too, so every value gets the style check.
+      const why = styleRefusal(value);
+      if (why) out.add(why);
       if ((local === "href" || local === "src") && !value.startsWith("#")) {
         out.add("an `href` or `src` that leaves the file (only `#fragment` links are admitted)");
       }
@@ -860,7 +858,7 @@ export function svgRefusals(text: string): string[] {
     const why = styleRefusal(decodeRefs(css));
     if (why) out.add(why);
   }
-  if (/url\(\s*['"]?(?!#)[^)'"\s]/i.test(decoded) || /@import\b/i.test(decoded) || /image-set\(/i.test(decoded)) {
+  if (/url\(\s*(?:['"][\s\x00-\x1f]*)?(?!#)[^)'"\s\x00-\x1f]/i.test(decoded) || /@import\b/i.test(decoded) || /image-set\(/i.test(decoded)) {
     out.add("a style that loads from outside the file (`url(…)`, `image-set(…)` or `@import`)");
   }
   return [...out];

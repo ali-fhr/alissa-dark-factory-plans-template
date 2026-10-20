@@ -865,6 +865,32 @@ describe("evidence/ — K1 types, K4 caps, K5 scan, K9 cites (EV-1)", () => {
     assert.deepEqual(svgRefusals(`<svg xmlns="http://www.w3.org/2000/svg"><style>.a { fill: url("#g"); font-family: "Inter", sans-serif }</style><text>p &lt; 0.05 &amp; n &#8805; 30 &#x2014; R&D</text><rect class="a" style="opacity:0.5"/></svg>`), []);
   });
 
+  // PR #8 round 3: presentation attributes are CSS, and the URL parser strips whitespace inside a quoted url().
+  it("c3: K1 refuses a presentation attribute whose quoted url() starts with whitespace", async () => {
+    only(await offline(variant((d) => {
+      writeFileSync(join(d, "evidence", "flow.svg"), `<svg xmlns="http://www.w3.org/2000/svg"><rect fill="url(' https://evil.example/p.svg#a')"/></svg>\n`);
+      appendBody(d, "The flow [evidence:flow.svg].");
+    })), "K1", "evidence/flow.svg", /a style that loads from outside the file/);
+    const quoted = "a style function with a quoted argument other than a `#fragment`";
+    const loads = "a style that loads from outside the file (`url(…)`, `image-set(…)` or `@import`)";
+    const inputs = [
+      `<svg><rect fill="url(' https://evil.example/p.svg#a')"/></svg>`,
+      `<svg><rect filter="url(&quot; https://evil.example/f.svg#f&quot;)"/></svg>`,
+      `<svg><rect cursor="url(' https://evil.example/c.png'), auto"/></svg>`,
+      `<svg><path marker-start="url('&#9;https://evil.example/m.svg#m')"/></svg>`,
+      `<svg><rect mask="url('\thttps://evil.example/k.svg#k')"/></svg>`,
+    ];
+    for (const text of inputs) {
+      const got = svgRefusals(text);
+      assert.ok(got.includes(quoted) && got.includes(loads), `${text} → ${JSON.stringify(got)}`);
+    }
+    // Each half alone: the whole-text url( check (an unparsed processing instruction) and the attribute check.
+    assert.ok(svgRefusals(`<?x url(' https://evil.example/p.svg')?><svg/>`).includes(loads));
+    assert.ok(svgRefusals(`<svg><rect clip-path="image(' https://evil.example/p.png')"/></svg>`).includes(quoted));
+    // A fragment with whitespace around it is still a fragment.
+    assert.deepEqual(svgRefusals(`<svg xmlns="http://www.w3.org/2000/svg"><rect fill="url(' #g')" filter="url(#f)" mask="url( &quot;#m&quot; )"/></svg>`), []);
+  });
+
   it("c2: K1 refuses text evidence that is not UTF-8, so neither scan is blinded", async () => {
     const utf16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>`, "utf16le")]);
     only(await offline(variant((d) => {
