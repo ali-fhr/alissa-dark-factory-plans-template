@@ -1,14 +1,14 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/ali-fhr/alissa-plans/schema/findings.v1.json",
-  "title": "alissa-plans findings frontmatter, version 1.1 (knowledge-base/<YYYY>/<MM>/<DD>/TASK-<n>/findings.md)",
-  "description": "Widened in place from v1 (design alissa-build-discovery §2.3, §2.5, §4.6), so every alissa-findings/v1 file validates as written. v1.1 adds the URL cite beside the repo cite, bodyOfWork as the alternative to project (exactly one of the two), asker, and reads that may be empty.",
+  "title": "alissa-plans findings frontmatter, version 1.2 (knowledge-base/<YYYY>/<MM>/<DD>/TASK-<n>/findings.md)",
+  "description": "Widened in place from v1 (design alissa-build-discovery §2.3, §2.5, §4.6), so every alissa-findings/v1 file validates as written. v1.1 adds the URL cite beside the repo cite, bodyOfWork as the alternative to project (exactly one of the two), asker, and reads that may be empty. v1.2 (operator decision 2026-10-20) adds the evidence cite, naming a file of the finding's own evidence/ folder; a v1 or v1.1 file carries none.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "task", "reads", "topics", "questions"],
   "oneOf": [{ "required": ["project"], "properties": { "project": true } }, { "required": ["bodyOfWork"], "properties": { "bodyOfWork": true } }],
   "properties": {
-    "schema": { "type": "string", "enum": ["alissa-findings/v1", "alissa-findings/v1.1"] },
+    "schema": { "type": "string", "enum": ["alissa-findings/v1", "alissa-findings/v1.1", "alissa-findings/v1.2"] },
     "task": { "$ref": "#/definitions/taskRef" },
     "project": { "$ref": "#/definitions/convexId" },
     "bodyOfWork": { "$ref": "#/definitions/convexId" },
@@ -95,6 +95,18 @@
       }
     }
   },
+  "allOf": [
+    {
+      "if": { "properties": { "schema": { "const": "alissa-findings/v1.1" } } },
+      "then": {
+        "description": "An alissa-findings/v1.1 file carries no evidence cite: that is v1.2's.",
+        "properties": {
+          "questions": { "items": { "properties": { "cites": { "items": { "not": { "$ref": "#/definitions/evidenceCite" } } } } } },
+          "risks": { "items": { "properties": { "cites": { "items": { "not": { "$ref": "#/definitions/evidenceCite" } } } } } }
+        }
+      }
+    }
+  ],
   "if": { "properties": { "schema": { "const": "alissa-findings/v1" } } },
   "then": {
     "description": "An alissa-findings/v1 file is read exactly as before v1.1: a project, at least one read, repo cites without a kind.",
@@ -118,8 +130,18 @@
     "oneLine": { "type": "string", "minLength": 1, "pattern": "^[^\\r\\n\\u2028\\u2029]+$" },
     "httpsUrl": { "type": "string", "maxLength": 2048, "pattern": "^https://[^\\s]+$" },
     "cite": {
-      "description": "A repo cite (`kind` absent or `repo`), or in v1.1 a URL cite (§2.5).",
-      "oneOf": [{ "$ref": "#/definitions/repoCite" }, { "$ref": "#/definitions/urlCite" }]
+      "description": "A repo cite (`kind` absent or `repo`), in v1.1 a URL cite (§2.5), or in v1.2 an evidence cite.",
+      "oneOf": [{ "$ref": "#/definitions/repoCite" }, { "$ref": "#/definitions/urlCite" }, { "$ref": "#/definitions/evidenceCite" }]
+    },
+    "evidenceCite": {
+      "description": "v1.2: a file of the finding's own evidence/ folder, by its name (K9 holds the two to each other).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "file"],
+      "properties": {
+        "kind": { "const": "evidence" },
+        "file": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$" }
+      }
     },
     "urlCite": {
       "type": "object",

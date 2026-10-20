@@ -1,0 +1,4 @@
+key,required,read_at_startup
+DATABASE_URL,yes,yes
+LOG_LEVEL,no,yes
+FEATURE_RELOAD,no,no

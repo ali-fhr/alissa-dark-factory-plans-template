@@ -45,8 +45,10 @@ per-fleet configuration (default `<owner>/alissa-dark-factory-plans`) — never 
 `knowledge-base/` holds discovery findings (README, *The knowledge base*; design
 `alissa-build-discovery.md` §2–§4). A discovery session writes exactly one new directory,
 `knowledge-base/<YYYY>/<MM>/<DD>/TASK-<n>/` (its task's creation day, UTC), holding `findings.md`
-and nothing else; milestone 0's design task writes exactly one `knowledge-base/assessments/*.md`
-file instead. Run `node lint/plan-lint.ts --kb <dir>` before pushing — rules K1–K8, K7 and K8
+and, optionally, a flat `evidence/` folder (png, jpg, webp, inert svg, csv, json, mmd, d2, txt, log;
+≤ 2 MB a file, 10 MB and 20 files in all), every file cited from `findings.md` as `evidence:<file>`
+(K9) and nothing else; milestone 0's design task writes exactly one `knowledge-base/assessments/*.md`
+file instead. Run `node lint/plan-lint.ts --kb <dir>` before pushing — rules K1–K9, K7 and K8
 through Studio's verify routes — and never push a finding your own run refuses. A URL cite
 (`alissa-findings/v1.1`) needs a task whose `Alissa-Sources:` is `web` or `both`, a verbatim
 `quote` and, best, an `archive` taken when the page was read. The run's last line,

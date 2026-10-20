@@ -11,13 +11,13 @@
 // | bodyOfWork` is a `oneOf`.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { reportKb } from "../plan-lint.ts";
 import {
-  KB_ARCHIVE_HOSTS, KB_DENY_PATTERNS, KB_TOKEN_SHAPE_SOURCES, type KRule, K_RULE_NAMES, discoveryReviewLine, findingsSchema, isDeniedPath, lintKb, secretShapedLines,
-  taskOfBranch,
+  KB_ARCHIVE_HOSTS, KB_DENY_PATTERNS, KB_TOKEN_SHAPE_SOURCES, type KRule, K_RULE_NAMES, discoveryReviewLine, findingsSchema, isDeniedPath, kRulesRan, lintKb, secretShapedLines,
+  svgRefusals, taskOfBranch,
 } from "../rules.ts";
 import { parseFrontmatter, splitFrontmatter } from "../markdown.ts";
 import { readKbDir } from "../source.ts";
@@ -84,10 +84,10 @@ describe("knowledge-base fixtures (c2)", () => {
   });
 
   for (const name of ["kb-golden", "kb-golden-web"]) {
-    it(`${name} passes K1–K8`, async () => {
+    it(`${name} passes K1–K9`, async () => {
       const r = await lintCase(name);
       assert.deepEqual(r.failures, []);
-      assert.deepEqual(r.rulesRun, ["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8"]);
+      assert.deepEqual(r.rulesRun, ["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9"]);
       assert.equal(r.questionCount, 2);
     });
   }
@@ -127,11 +127,11 @@ describe("knowledge-base fixtures (c2)", () => {
     assert.match(await messages("kb-k8-unavailable"), /^plan-lint could not run: URL cite `https:\/\/docs\.example\.com\/flaky` is unavailable \(a 5xx or a timeout\)/);
   });
 
-  it("offline runs K1–K5 only; the K6, K7 and K8 fixtures pass them", async () => {
+  it("offline runs K1–K5 and K9 only; the K6, K7 and K8 fixtures pass them", async () => {
     for (const name of ["kb-golden", "kb-golden-web", "kb-k6-task", "kb-k7-cites", "kb-k8-refuted", "kb-k8-gone", "kb-k8-blocked", "kb-k8-unavailable", "kb-k8-archived"]) {
       const run = await runCli(["--kb", kbFixture(name), "--no-base", "--offline"]);
       assert.equal(run.status, 0, run.stdout + run.stderr);
-      assert.match(run.stdout, /knowledge-base mode — [12] question\(s\) — K1–K5$/m);
+      assert.match(run.stdout, /knowledge-base mode — [12] question\(s\) — K1–K5, K9$/m);
       assert.match(run.stdout, /K6–K8 not run \(offline\)/);
     }
   });
@@ -206,7 +206,7 @@ describe("--pr in the knowledge-base mode (c1, c3)", () => {
     const run = await runCli(prArgs(pr, ["--check-output", out]), cliEnv(api));
     assert.equal(run.status, 0, run.stdout + run.stderr);
     assert.doesNotMatch(run.stdout, /nothing to lint/);
-    assert.match(run.stdout, /^plan-lint: knowledge-base\/2026\/10\/14\/TASK-1234 — knowledge-base mode — 2 question\(s\) — K1–K8$/m);
+    assert.match(run.stdout, /^plan-lint: knowledge-base\/2026\/10\/14\/TASK-1234 — knowledge-base mode — 2 question\(s\) — K1–K9$/m);
     const check = JSON.parse(readFileSync(out, "utf8")) as { conclusion: string; title: string };
     assert.deepEqual(check, { ...check, conclusion: "success", title: "PASS — knowledge-base — knowledge-base/2026/10/14/TASK-1234" });
   });
@@ -728,6 +728,139 @@ describe("schema v1.3 in a plan — sources, a web task's repo, an ask's milesto
     const run = await runCli([dir, "--no-base", "--offline"]);
     assert.equal(run.status, 1);
     assert.match(run.stdout, /FAIL rule 2 .*\/asker is not allowed on this kind of task/);
+  });
+});
+
+// Discovery evidence EV-1 (operator decision 2026-10-20): a finding may carry a flat `evidence/`
+// folder. c1 the golden finding with a cited png and csv passes; c2 K9 refuses an uncited file and
+// a dangling cite, K1 a nested path and a disallowed type, K4 the size caps and K1 an active svg —
+// each by name; c3 K5 scans text evidence, and the integration-check mode is untouched (ic.test.ts).
+describe("evidence/ — K1 types, K4 caps, K5 scan, K9 cites (EV-1)", () => {
+  const EV_TASK = "TASK-1300";
+  before(() => {
+    api.kb.tasks[EV_TASK] = { kind: "discovery", createdAt: Date.UTC(2026, 9, 20, 8, 0), reads: `example-org/service-b@${KB_SHA}` };
+  });
+  /** A copy of the golden evidence finding, to edit; `edit` gets the directory. */
+  const variant = (edit: (dir: string) => void): string => {
+    const dir = join(tempDir("kb-ev"), "knowledge-base", "2026", "10", "20", EV_TASK);
+    cpSync(kbFixture("kb-evidence"), dir, { recursive: true });
+    edit(dir);
+    return dir;
+  };
+  const appendBody = (dir: string, line: string): void => writeFileSync(join(dir, "findings.md"), `${readFileSync(join(dir, "findings.md"), "utf8")}\n${line}\n`);
+  const offline = async (dir: string) => (await lintKb(readKbDir(dir, null), { online: false })).failures;
+  const only = (f: Array<{ rule: string; file?: string; message: string }>, rule: KRule, file: string, re: RegExp): void => {
+    assert.deepEqual([...new Set(f.map((x) => x.rule))], [rule], JSON.stringify(f, null, 2));
+    assert.ok(f.some((x) => x.file === file && re.test(x.message)), JSON.stringify(f, null, 2));
+  };
+
+  it("c1: the golden finding — a cited png and csv — passes K1–K9, through --kb and --pr", async () => {
+    const r = await lintCase("kb-evidence");
+    assert.deepEqual(r.failures, []);
+    assert.deepEqual(r.rulesRun, ["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9"]);
+    const run = await runCli(["--kb", kbFixture("kb-evidence"), "--no-base"], cliEnv(api));
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.match(run.stdout, /K1–K9$/m);
+    const pr = await runCli(prArgs(kbPr("kb-evidence")), cliEnv(api));
+    assert.equal(pr.status, 0, pr.stdout + pr.stderr);
+    assert.match(pr.stdout, /^plan-lint: knowledge-base\/2026\/10\/20\/TASK-1300 — knowledge-base mode — 2 question\(s\) — K1–K9$/m);
+    const off = await runCli(["--kb", kbFixture("kb-evidence"), "--no-base", "--offline"]);
+    assert.equal(off.status, 0, off.stdout);
+    assert.match(off.stdout, /— K1–K5, K9$/m);
+  });
+
+  it("c2: K9 refuses an uncited evidence file, naming it", async () => {
+    only(await offline(variant((d) => writeFileSync(join(d, "evidence", "extra.txt"), "a stray note\n"))), "K9", "evidence/extra.txt", /is never cited/);
+  });
+
+  it("c2: K9 refuses a dangling cite, inline or in a question's cites", async () => {
+    only(await offline(variant((d) => appendBody(d, "The old page [evidence:settings-1280.png]."))), "K9", "findings.md", /`evidence:settings-1280\.png` is cited, but `evidence\/settings-1280\.png` is not in the folder/);
+    only(await offline(variant((d) => rmSync(join(d, "evidence", "counts.csv")))), "K9", "findings.md", /`evidence:counts\.csv` is cited/);
+  });
+
+  it("c2: K1 refuses a nested path, a disallowed type, a bad name, a symlink and an image whose bytes are not its type", async () => {
+    only(await offline(variant((d) => {
+      mkdirSync(join(d, "evidence", "shots"));
+      writeFileSync(join(d, "evidence", "shots", "a.png"), readFileSync(join(d, "evidence", "settings-1440.png")));
+    })), "K1", undefined as unknown as string, /`evidence\/shots` is a nested path/);
+    only(await offline(variant((d) => {
+      writeFileSync(join(d, "evidence", "run.exe"), "MZ");
+      appendBody(d, "The tool [evidence:run.exe].");
+    })), "K1", "evidence/run.exe", /is a `\.exe` file — evidence is png, jpg, jpeg, webp, svg, csv, json, mmd, d2, txt, log only/);
+    only(await offline(variant((d) => {
+      writeFileSync(join(d, "evidence", "Notes.txt"), "x\n");
+      appendBody(d, "The note [evidence:Notes.txt].");
+    })), "K1", "evidence/Notes.txt", /is not named `\[a-z0-9\]\[a-z0-9\._-\]\{0,63\}`/);
+    only(await offline(variant((d) => symlinkSync("/etc/hostname", join(d, "evidence", "host.txt")))), "K1", undefined as unknown as string, /`evidence\/host\.txt` is a symbolic link/);
+    only(await offline(variant((d) => writeFileSync(join(d, "evidence", "settings-1440.png"), "not an image\n"))), "K1", "evidence/settings-1440.png", /is named `\.png`, but its bytes are not a PNG/);
+  });
+
+  it("c2: K1 refuses an svg with a script, an event handler or an external href; an inert svg passes", async () => {
+    const svg = (dir: string, body: string): void => {
+      writeFileSync(join(dir, "evidence", "flow.svg"), `<svg xmlns="http://www.w3.org/2000/svg">${body}</svg>\n`);
+      appendBody(dir, "The flow [evidence:flow.svg].");
+    };
+    only(await offline(variant((d) => svg(d, "<script>alert(1)</script>"))), "K1", "evidence/flow.svg", /carrying a `<script>` element/);
+    only(await offline(variant((d) => svg(d, `<rect onload="x()"/>`))), "K1", "evidence/flow.svg", /an event-handler attribute/);
+    only(await offline(variant((d) => svg(d, `<a href="https://example.com/x"><text>x</text></a>`))), "K1", "evidence/flow.svg", /an `href` that leaves the file/);
+    assert.deepEqual(await offline(variant((d) => svg(d, `<defs><linearGradient id="g"/></defs><use href="#g"/><rect fill="url(#g)"/>`))), []);
+    assert.deepEqual(svgRefusals(`<image xlink:href='data:image/png;base64,AAAA'/>`), ["an `href` that leaves the file (only `#fragment` links are admitted)"]);
+  });
+
+  it("c2: K4 caps a file at 2 MB, the folder at 10 MB and 20 files, by name", async () => {
+    only(await offline(variant((d) => {
+      writeFileSync(join(d, "evidence", "big.log"), "x".repeat(2 * 1024 * 1024 + 1));
+      appendBody(d, "The log [evidence:big.log].");
+    })), "K4", "evidence/big.log", /is 2097153 bytes; an evidence file is at most 2097152/);
+    const total = await offline(variant((d) => {
+      for (let i = 0; i < 6; i++) {
+        writeFileSync(join(d, "evidence", `part-${i}.log`), "x".repeat(1900 * 1024));
+        appendBody(d, `Part [evidence:part-${i}.log].`);
+      }
+    }));
+    assert.deepEqual([...new Set(total.map((f) => f.rule))], ["K4"]);
+    assert.match(total.map((f) => f.message).join("\n"), /the evidence is \d+ bytes in all; at most 10485760/);
+    const many = await offline(variant((d) => {
+      for (let i = 0; i < 19; i++) {
+        writeFileSync(join(d, "evidence", `n-${i}.txt`), "n\n");
+        appendBody(d, `Note [evidence:n-${i}.txt].`);
+      }
+    }));
+    assert.deepEqual(many.map((f) => `${f.rule} ${f.message}`), ["K4 the finding carries 21 evidence files; at most 20"]);
+  });
+
+  it("c3: K5 scans every text evidence file for secrets, and names the file but never the secret", async () => {
+    const key = ["AK", "IA", "Z".repeat(16)].join("");
+    const f = await offline(variant((d) => writeFileSync(join(d, "evidence", "counts.csv"), `key,value\nAWS_KEY,${key}\n`)));
+    only(f, "K5", "evidence/counts.csv", /secret-shaped text on line\(s\) 2/);
+    assert.doesNotMatch(JSON.stringify(f), new RegExp(key));
+    only(await offline(variant((d) => {
+      writeFileSync(join(d, "evidence", "trace.json"), `{"token": "${["gh", "p_", "A".repeat(36)].join("")}"}\n`);
+      appendBody(d, "The trace [evidence:trace.json].");
+    })), "K5", "evidence/trace.json", /secret-shaped text on line\(s\) 1/);
+  });
+
+  it("K2: a frontmatter evidence cite needs schema v1.2, and names a well-formed file", async () => {
+    const v11 = await offline(variant((d) => writeFileSync(join(d, "findings.md"), readFileSync(join(d, "findings.md"), "utf8").replace("alissa-findings/v1.2", "alissa-findings/v1.1"))));
+    assert.deepEqual([...new Set(v11.map((f) => f.rule))], ["K2"], JSON.stringify(v11));
+    assert.match(v11.map((f) => f.message).join("\n"), /\/questions\/0\/cites\/1 is an evidence cite — it needs `schema: alissa-findings\/v1\.2`/);
+    const bad = await offline(variant((d) => writeFileSync(join(d, "findings.md"), readFileSync(join(d, "findings.md"), "utf8").replace("file: counts.csv }", "file: ../counts.csv }"))));
+    assert.ok(bad.some((f) => f.rule === "K2" && /\/questions\/0\/cites\/1\/file must match pattern/.test(f.message)), JSON.stringify(bad));
+  });
+
+  it("--pr: an evidence file is added like findings.md; a nested path or a file beside evidence/ is refused by K1", async () => {
+    const dir = "knowledge-base/2026/10/20/TASK-1300";
+    const nested = await runCli(prArgs(kbPr("kb-evidence", { also: { [`${dir}/evidence/shots/a.txt`]: "x\n", [`${dir}/notes.md`]: "x\n" } }), ["--offline"]));
+    assert.equal(nested.status, 1, nested.stdout);
+    assert.match(nested.stdout, /K1 \(layout and immutability\): `evidence\/shots\/a\.txt` is a nested path/);
+    assert.match(nested.stdout, /`notes\.md` does not belong in a findings directory — it holds `findings\.md` and, optionally, `evidence\/<file>` \(flat\)/);
+  });
+
+  it("the report names the rules a run made, with gaps", () => {
+    assert.equal(kRulesRan(["K1", "K2", "K3", "K4", "K5", "K9"]), "K1–K5, K9");
+    assert.equal(kRulesRan(["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9"]), "K1–K9");
+    assert.equal(kRulesRan(["K1", "K5"]), "K1, K5");
+    assert.equal(kRulesRan(["K1", "K4", "K5"]), "K1, K4, K5");
   });
 });
 
