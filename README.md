@@ -341,8 +341,11 @@ carry artifacts — screenshots, diagrams, small data — the way an integration
   files only, each named `[a-z0-9][a-z0-9._-]{0,63}`, added once and never edited, like the finding.
 - **The types**, by extension — and an image by its first bytes too: `png`, `jpg`/`jpeg`, `webp`,
   `svg`, `csv`, `json`, `mmd` (Mermaid), `d2`, `txt`, `log`. Anything else is refused by name. An
-  svg must be inert: no `<script>`, no `on…=` event handler, no `href` other than a `#fragment`,
-  no style that loads from outside the file.
+  svg must be inert: no `<script>` (namespace prefix or not), no DTD (`<!DOCTYPE`/`<!ENTITY`), no
+  `<foreignObject>` or XHTML namespace, no `on…=` event handler, no `href` or `src` other than a
+  `#fragment`, no animation (`animate`, `set`, …) that rewrites an `href`/`src` or holds a URL, no
+  style that loads from outside the file. Text evidence is UTF-8 (a UTF-8 BOM is fine; UTF-16,
+  NUL bytes and invalid sequences are refused), so the svg and secret scans read what a viewer renders.
 - **The caps**: at most 2 MB per file, 10 MB per folder and 20 files.
 - **The cites.** `findings.md` cites a file as `evidence:<file>` — inline, anywhere in the file
   (*"the settings page today [evidence:settings-1440.png]"*), and/or in a question's or risk's
@@ -361,7 +364,7 @@ never *nothing to lint* — under the K rules, numbered apart from §5.5's:
 
 | Rule | Name | Refuses | Reads |
 |---|---|---|---|
-| K1 | layout and immutability | a diff outside **one** new `knowledge-base/<YYYY>/<MM>/<DD>/TASK-<n>/` directory (a mix with `plans/**` included); a directory already on the base branch; anything in it but `findings.md` and a flat `evidence/` folder; a nested `evidence/` path, a symlink, an evidence file misnamed, of a type not admitted, an image whose bytes are not its type, or an svg that is not inert; a date that is not a real calendar day; a change that is not an add. **The one exception:** exactly one new `knowledge-base/assessments/<project-slug>-<yyyy-mm-dd>.md` file and nothing else, from a `kind: design` task (milestone 0's assessment, §7.1) — the pull request's task is its `TASK-<n>-…` branch (`GITHUB_HEAD_REF`) or `--task` | git; Alissa for the assessment's task |
+| K1 | layout and immutability | a diff outside **one** new `knowledge-base/<YYYY>/<MM>/<DD>/TASK-<n>/` directory (a mix with `plans/**` included); a directory already on the base branch; anything in it but `findings.md` and a flat `evidence/` folder; a nested `evidence/` path, a symlink, an evidence file misnamed, of a type not admitted, an image whose bytes are not its type, text evidence that is not UTF-8, or an svg that is not inert; a date that is not a real calendar day; a change that is not an add. **The one exception:** exactly one new `knowledge-base/assessments/<project-slug>-<yyyy-mm-dd>.md` file and nothing else, from a `kind: design` task (milestone 0's assessment, §7.1) — the pull request's task is its `TASK-<n>-…` branch (`GITHUB_HEAD_REF`) or `--task` | git; Alissa for the assessment's task |
 | K2 | frontmatter | frontmatter that does not split, parse or validate against `schema/findings.v1.json`; a `task` that is not the directory's; a repeated question id or `reads` repository; a cite of a repository not in `reads` | — |
 | K3 | completeness | an `answered` or `partial` question with no `answer`; an `unanswerable` one with no `reason`; an `answered` one with no cite; a body with no `## Summary` | — |
 | K4 | size | `findings.md` over 32 KB; more than 12 questions, 12 risks, 8 suggested tasks or 24 cites per entry; a cite spanning more than 400 lines; a `## Summary` over 1,200 characters or a question's section over 6,000; an evidence file over 2 MB, a folder over 10 MB or 20 files | — |

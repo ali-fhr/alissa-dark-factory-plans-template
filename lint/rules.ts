@@ -11,7 +11,7 @@ import {
   DAG_BEGIN, DAG_END, SUMMARY_BEGIN, SUMMARY_END, isRecord, oneLine, readRegion, renderDag, renderSummary, taskView, type TaskView,
 } from "./render.ts";
 import {
-  EVIDENCE_DIR, FINDINGS_FILE, type IcSource, KB_EVIDENCE_READ_CAP, KB_EVIDENCE_TYPES, type KbSource, type PlanSource, REPORT_FILE, extensionOf, isTaskPath,
+  EVIDENCE_DIR, FINDINGS_FILE, type IcSource, KB_EVIDENCE_READ_CAP, KB_EVIDENCE_TYPES, type KbSource, type PlanSource, REPORT_FILE, extensionOf, isKbTextEvidence, isTaskPath,
 } from "./source.ts";
 
 /** A §5.5 rule number, or `5b` — the scope-path preflight, which runs with the online rules. */
@@ -717,8 +717,8 @@ export const KB_LIMITS = {
 
 /** An evidence file's name (K1): lower case, at most 64 characters. */
 export const KB_EVIDENCE_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
-/** An inline evidence cite in findings.md (K9): `evidence:<file>`, not inside a longer word. */
-const INLINE_EVIDENCE_RE = /(?<![A-Za-z0-9_-])evidence:([a-z0-9][a-z0-9._-]{0,63})/g;
+/** An inline evidence cite in findings.md (K9): `evidence:<file>`, not inside a longer word, path or URL. */
+const INLINE_EVIDENCE_RE = /(?<![A-Za-z0-9_./:-])evidence:([a-z0-9][a-z0-9._-]{0,63})/g;
 
 /** Why an image's bytes are not its extension's type (K1), or null. */
 function imageMismatch(ext: string, b: Buffer): string | null {
@@ -730,26 +730,79 @@ function imageMismatch(ext: string, b: Buffer): string | null {
   return null;
 }
 
-/** What makes an svg active or a fetch (K1): a script, an event handler, an `href` off the page. Never the text itself. */
+/** An element name, after an optional namespace prefix (`<s:script`, `<script`). */
+const svgElement = (name: string): RegExp => new RegExp(`<(?:[\\w.-]+:)?${name}\\b`, "i");
+/** One tag, quote-aware, so a `>` inside an attribute value does not end it. Linear: no two branches start alike. */
+const SVG_TAG_RE = /<[^<>"']*(?:(?:"[^"]*"|'[^']*')[^<>"']*)*>/g;
+/** One attribute of a tag: its (possibly prefixed) name and its value. */
+const SVG_ATTR_RE = /(?<![\w.:-])((?:[\w.-]+:)?[\w.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>]+))/g;
+/** SMIL elements that can set another attribute's value. */
+const SVG_ANIMATION_RE = /^<(?:[\w.-]+:)?(?:animate|set|animateMotion|animateTransform|animateColor)\b/i;
+
+/** An attribute value with its character references decoded, as the XML parser reads it. */
+function decodeRefs(v: string): string {
+  return v.replace(/&(?:#(\d{1,7})|#x([0-9a-f]{1,6})|(amp|lt|gt|quot|apos));/gi, (_, d, h, n) => {
+    if (n) return ({ amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" } as Record<string, string>)[n.toLowerCase()] ?? "";
+    const cp = Number.parseInt(d ?? h, d ? 10 : 16);
+    return cp <= 0x10ffff ? String.fromCodePoint(cp) : "";
+  });
+}
+
+/**
+ * What makes an svg active or a fetch (K1): a DTD, a script, an HTML island, an event handler, an
+ * `href`/`src` off the page, an animation that rewrites one, a style that loads. Never the text itself.
+ */
 export function svgRefusals(text: string): string[] {
-  const out: string[] = [];
-  if (/<script\b/i.test(text)) out.push("a `<script>` element");
-  // Tag by tag (`[^<>]*` cannot backtrack across tags), so a hostile 2 MB file stays linear.
-  for (const m of text.matchAll(/<[^<>]*>/g)) {
-    if (/\son[a-z]+\s*=/i.test(m[0])) {
-      out.push("an event-handler attribute (`on…=`)");
+  const out = new Set<string>();
+  // A DTD can declare entities that expand into elements; evidence never needs one.
+  if (/<!(?:DOCTYPE|ENTITY)\b/i.test(text)) out.add("a DTD (`<!DOCTYPE` or `<!ENTITY`)");
+  if (svgElement("script").test(text)) out.add("a `<script>` element");
+  if (svgElement("foreignObject").test(text)) out.add("a `<foreignObject>` element");
+  if (/http:\/\/www\.w3\.org\/1999\/xhtml/i.test(text)) out.add("the XHTML namespace (HTML inside the svg)");
+  // Tag by tag (see SVG_TAG_RE), so a hostile 2 MB file stays linear.
+  for (const m of text.matchAll(SVG_TAG_RE)) {
+    const tag = m[0];
+    const animation = SVG_ANIMATION_RE.test(tag);
+    for (const a of tag.matchAll(SVG_ATTR_RE)) {
+      const name = (a[1] as string).toLowerCase();
+      const local = name.slice(name.lastIndexOf(":") + 1);
+      const value = decodeRefs(a[2] ?? a[3] ?? a[4] ?? "").trim();
+      if (/^on[a-z]+$/.test(local)) out.add("an event-handler attribute (`on…=`)");
+      if ((local === "href" || local === "src") && !value.startsWith("#")) {
+        out.add("an `href` or `src` that leaves the file (only `#fragment` links are admitted)");
+      }
+      if (animation && local === "attributename" && /^(?:[\w.-]+:)?(?:href|src)$/i.test(value)) {
+        out.add("an animation that rewrites an `href` or `src`");
+      }
+      if (animation && ["values", "to", "from", "by"].includes(local) && /[a-z][a-z0-9+.-]*:|\/\/|url\(/i.test(value)) {
+        out.add("an animation whose values hold a URL");
+      }
+    }
+    // `<svg/onload=…>`: in HTML, `/` separates attributes, and a quote may end one.
+    if (/[\s/"']on[a-z]+\s*=/i.test(tag)) out.add("an event-handler attribute (`on…=`)");
+  }
+  // A `<?xml-stylesheet href=…?>` and the like are not tags above; any `href`/`src` outside a `#fragment` is refused.
+  for (const m of text.matchAll(/(?<![\w.:-])(?:[\w.-]+:)?(?:href|src)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi)) {
+    if (!decodeRefs(m[1] ?? m[2] ?? m[3] ?? "").trim().startsWith("#")) {
+      out.add("an `href` or `src` that leaves the file (only `#fragment` links are admitted)");
       break;
     }
   }
-  for (const m of text.matchAll(/\b(?:xlink:)?href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi)) {
-    const v = (m[1] ?? m[2] ?? m[3] ?? "").trim();
-    if (!v.startsWith("#")) {
-      out.push("an `href` that leaves the file (only `#fragment` links are admitted)");
-      break;
-    }
+  if (/url\(\s*['"]?(?!#)[^)'"\s]/i.test(text) || /@import\b/i.test(text)) out.add("a style that loads from outside the file (`url(…)` or `@import`)");
+  return [...out];
+}
+
+/** Why a text evidence file's bytes are not plain UTF-8 (K1), or null: a scan of mis-decoded text sees nothing. */
+export function notUtf8(b: Buffer): string | null {
+  const is = (sig: number[]): boolean => sig.every((x, i) => b[i] === x);
+  if (is([0xff, 0xfe]) || is([0xfe, 0xff]) || is([0x00, 0x00, 0xfe, 0xff])) return "starts with a UTF-16 or UTF-32 byte-order mark";
+  if (b.includes(0)) return "holds a NUL byte";
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(b);
+  } catch {
+    return "is not valid UTF-8";
   }
-  if (/url\(\s*['"]?(?!#)[^)'"\s]/i.test(text) || /@import\b/i.test(text)) out.push("a style that loads from outside the file (`url(…)` or `@import`)");
-  return out;
+  return null;
 }
 
 export const FINDINGS_SCHEMA_V1 = "alissa-findings/v1";
@@ -1299,6 +1352,11 @@ function kbEvidenceShape(src: KbSource, evidence: string[], fail: KbFail): void 
     if (bytes === undefined) continue;
     const not = imageMismatch(ext, bytes);
     if (not) fail("K1", `is named \`.${ext}\`, but its bytes are not ${not}`, rel);
+    const enc = isKbTextEvidence(rel) ? notUtf8(bytes) : null;
+    if (enc) {
+      fail("K1", `${enc} — text evidence is UTF-8, so the svg and secret scans read what a viewer renders`, rel);
+      continue;
+    }
     if (ext === "svg") {
       const why = svgRefusals(src.files.get(rel) ?? "");
       if (why.length > 0) fail("K1", `is an svg carrying ${why.join(", ")} — an svg is evidence only when it is inert`, rel);

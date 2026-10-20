@@ -802,9 +802,45 @@ describe("evidence/ — K1 types, K4 caps, K5 scan, K9 cites (EV-1)", () => {
     };
     only(await offline(variant((d) => svg(d, "<script>alert(1)</script>"))), "K1", "evidence/flow.svg", /carrying a `<script>` element/);
     only(await offline(variant((d) => svg(d, `<rect onload="x()"/>`))), "K1", "evidence/flow.svg", /an event-handler attribute/);
-    only(await offline(variant((d) => svg(d, `<a href="https://example.com/x"><text>x</text></a>`))), "K1", "evidence/flow.svg", /an `href` that leaves the file/);
-    assert.deepEqual(await offline(variant((d) => svg(d, `<defs><linearGradient id="g"/></defs><use href="#g"/><rect fill="url(#g)"/>`))), []);
-    assert.deepEqual(svgRefusals(`<image xlink:href='data:image/png;base64,AAAA'/>`), ["an `href` that leaves the file (only `#fragment` links are admitted)"]);
+    only(await offline(variant((d) => svg(d, `<a href="https://example.com/x"><text>x</text></a>`))), "K1", "evidence/flow.svg", /an `href` or `src` that leaves the file/);
+    assert.deepEqual(await offline(variant((d) => svg(d, `<defs><linearGradient id="g"/></defs><use href="#g"/><rect fill="url(#g)"><animate attributeName="opacity" values="0;1" dur="2s"/></rect>`))), []);
+    assert.deepEqual(svgRefusals(`<image xlink:href='data:image/png;base64,AAAA'/>`), ["an `href` or `src` that leaves the file (only `#fragment` links are admitted)"]);
+  });
+
+  // PR #8 round 1: the vectors the first svg check let through, one row each.
+  it("c2: K1 refuses a prefixed script, a DTD, a `/`-separated handler, href animation, foreignObject and src", async () => {
+    only(await offline(variant((d) => {
+      writeFileSync(join(d, "evidence", "flow.svg"), `<svg xmlns="http://www.w3.org/2000/svg" xmlns:s="http://www.w3.org/2000/svg"><s:script>alert(1)</s:script></svg>\n`);
+      appendBody(d, "The flow [evidence:flow.svg].");
+    })), "K1", "evidence/flow.svg", /carrying a `<script>` element/);
+    const rows: Array<[string, string]> = [
+      [`<!DOCTYPE svg [<!ENTITY s "&#60;script>alert(1)&#60;/script>">]><svg xmlns="http://www.w3.org/2000/svg">&s;</svg>`, "a DTD (`<!DOCTYPE` or `<!ENTITY`)"],
+      [`<svg/onload=alert(1)>`, "an event-handler attribute (`on…=`)"],
+      [`<svg><rect title="a>b" onclick="x()"/></svg>`, "an event-handler attribute (`on…=`)"],
+      [`<svg><a><animate attributeName="href" values="javascript:alert(1)"/><text>x</text></a></svg>`, "an animation that rewrites an `href` or `src`"],
+      [`<svg><a><set attributeName="xlink:href" to="https://evil.example/"/><text>x</text></a></svg>`, "an animation that rewrites an `href` or `src`"],
+      [`<svg><a><set attributeName="&#104;ref" to="#x"/><text>x</text></a></svg>`, "an animation that rewrites an `href` or `src`"],
+      [`<svg><rect><animate attributeName="fill" values="url(https://evil.example/p)"/></rect></svg>`, "an animation whose values hold a URL"],
+      [`<svg><foreignObject><img xmlns="http://www.w3.org/1999/xhtml" src="https://evil.example/t.png"/></foreignObject></svg>`, "a `<foreignObject>` element"],
+      [`<svg><h:img xmlns:h="http://www.w3.org/1999/xhtml"/></svg>`, "the XHTML namespace (HTML inside the svg)"],
+      [`<svg><image src="https://evil.example/t.png"/></svg>`, "an `href` or `src` that leaves the file (only `#fragment` links are admitted)"],
+    ];
+    for (const [text, why] of rows) assert.ok(svgRefusals(text).includes(why), `${text} → ${JSON.stringify(svgRefusals(text))}`);
+  });
+
+  it("c2: K1 refuses text evidence that is not UTF-8, so neither scan is blinded", async () => {
+    const utf16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>`, "utf16le")]);
+    only(await offline(variant((d) => {
+      writeFileSync(join(d, "evidence", "flow.svg"), utf16);
+      appendBody(d, "The flow [evidence:flow.svg].");
+    })), "K1", "evidence/flow.svg", /starts with a UTF-16 or UTF-32 byte-order mark/);
+    only(await offline(variant((d) => writeFileSync(join(d, "evidence", "counts.csv"), Buffer.from([0x6b, 0x2c, 0xc3, 0x28, 0x0a])))), "K1", "evidence/counts.csv", /is not valid UTF-8/);
+    only(await offline(variant((d) => writeFileSync(join(d, "evidence", "counts.csv"), "k,v\na,\u0000\n"))), "K1", "evidence/counts.csv", /holds a NUL byte/);
+    assert.deepEqual(await offline(variant((d) => writeFileSync(join(d, "evidence", "counts.csv"), "\ufeffk,v\na,1\n"))), []);
+  });
+
+  it("K9: `evidence:` inside a URL, a path or a longer word is not a cite", async () => {
+    assert.deepEqual(await offline(variant((d) => appendBody(d, "See https://host.example/evidence:foo.png and a.evidence:bar.png and x:evidence:baz.png."))), []);
   });
 
   it("c2: K4 caps a file at 2 MB, the folder at 10 MB and 20 files, by name", async () => {
