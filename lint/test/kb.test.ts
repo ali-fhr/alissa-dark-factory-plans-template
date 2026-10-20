@@ -918,7 +918,7 @@ describe("evidence/ — K1 types, K4 caps, K5 scan, K9 cites (EV-1)", () => {
     assert.deepEqual(svgRefusals(w(`<!-- Q1's numbers --><rect><animate attributeName="opacity" values="0;1" dur="1s"/></rect><![CDATA[ it's ]]><?note ' ?>`)), []);
   });
 
-  it("c3: K1 refuses any element that is not an SVG element (HTML breakout tags), and `srcset`", async () => {
+  it("c3: K1 refuses any element that is not an SVG element (HTML breakout tags), `srcset` and `ping`", async () => {
     only(await offline(variant((d) => {
       writeFileSync(join(d, "evidence", "flow.svg"), `<svg xmlns="http://www.w3.org/2000/svg"><table background="https://evil.example/t.png"></table></svg>\n`);
       appendBody(d, "The flow [evidence:flow.svg].");
@@ -937,6 +937,12 @@ describe("evidence/ — K1 types, K4 caps, K5 scan, K9 cites (EV-1)", () => {
     assert.deepEqual(svgRefusals(w(`<text>a</p>b</text>`)), [foreign("p")]);
     assert.deepEqual(svgRefusals(w(`<!--><img/>-->`)), [foreign("img")]);
     assert.deepEqual(svgRefusals(w(`<image srcset="#a 1x" href="#a"/>`)), [srcset]);
+    // `ping` on a hyperlink (SVG 2): refused by name, prefixed or not, hidden past a comment quote too; the word in chart text passes.
+    const ping = "a `ping` attribute (a fetch from outside the file)";
+    assert.deepEqual(svgRefusals(w(`<a href="#g" ping="https://evil.example/beacon"><text>x</text></a>`)), [ping]);
+    assert.deepEqual(svgRefusals(w(`<a href="#g" PING="#g" x:ping="#g"><text>x</text></a>`)), [ping]);
+    assert.deepEqual(svgRefusals(w(`<!-- ' --><a href="#g" ping="https://evil.example/b"><text>x</text></a><!-- ' -->`)), [ping]);
+    assert.deepEqual(svgRefusals(w(`<text>ping = 20 ms</text><rect data-ping="1"/>`)), []);
     assert.deepEqual(svgRefusals(w(`<b/><i/><u/><s/><p/><div/>`)), [`an element that is not an SVG element (\`<b>\`, \`<i>\`, \`<u>\`, \`<s>\`, \`<p>\`, …)`]);
     // An ordinary chart: mixed-case SVG names, gradients, a filter, markers, text paths, animations.
     assert.deepEqual(svgRefusals(w(`<defs><linearGradient id="g"><stop offset="0"/></linearGradient><clipPath id="c"><rect/></clipPath><filter id="f"><feGaussianBlur stdDeviation="2"/><feMerge><feMergeNode/></feMerge></filter><marker id="m"><path d="M0 0"/></marker></defs><g clip-path="url(#c)"><polyline points="0,0 1,1"/><text><tspan>p &lt; 0.05</tspan><textPath href="#p">x</textPath></text><circle><animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="2s"/></circle><use href="#m"/></g><title>t</title><desc>d</desc>`)), []);
