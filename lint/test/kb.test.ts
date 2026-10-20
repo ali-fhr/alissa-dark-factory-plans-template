@@ -918,6 +918,30 @@ describe("evidence/ — K1 types, K4 caps, K5 scan, K9 cites (EV-1)", () => {
     assert.deepEqual(svgRefusals(w(`<!-- Q1's numbers --><rect><animate attributeName="opacity" values="0;1" dur="1s"/></rect><![CDATA[ it's ]]><?note ' ?>`)), []);
   });
 
+  it("c3: K1 refuses any element that is not an SVG element (HTML breakout tags), and `srcset`", async () => {
+    only(await offline(variant((d) => {
+      writeFileSync(join(d, "evidence", "flow.svg"), `<svg xmlns="http://www.w3.org/2000/svg"><table background="https://evil.example/t.png"></table></svg>\n`);
+      appendBody(d, "The flow [evidence:flow.svg].");
+    })), "K1", "evidence/flow.svg", /an element that is not an SVG element \(`<table>`\)/);
+    const foreign = (...names: string[]): string => `an element that is not an SVG element (${names.map((n) => `\`<${n}>\``).join(", ")})`;
+    const srcset = "a `srcset` attribute (a fetch from outside the file)";
+    const w = (s: string): string => `<svg xmlns="http://www.w3.org/2000/svg">${s}</svg>`;
+    // The reviewer's three inputs.
+    assert.deepEqual(svgRefusals(w(`<img srcset="https://evil.example/t.png 1x"/>`)), [foreign("img"), srcset]);
+    assert.deepEqual(svgRefusals(w(`<meta http-equiv="refresh" content="0;url=https://evil.example/"/>`)), [foreign("meta")]);
+    assert.deepEqual(svgRefusals(w(`<table background="https://evil.example/t.png"></table>`)), [foreign("table")]);
+    // Case, a prefix, a font breakout, an end-tag breakout (`</p>` makes a <p>, named without its slash), a tag hidden in a comment, and srcset on an SVG element.
+    assert.deepEqual(svgRefusals(w(`<IMG src="#a"/>`)), [foreign("IMG")]);
+    assert.deepEqual(svgRefusals(w(`<s:embed/>`)), [foreign("s:embed")]);
+    assert.deepEqual(svgRefusals(w(`<font color="red">x</font>`)), [foreign("font")]);
+    assert.deepEqual(svgRefusals(w(`<text>a</p>b</text>`)), [foreign("p")]);
+    assert.deepEqual(svgRefusals(w(`<!--><img/>-->`)), [foreign("img")]);
+    assert.deepEqual(svgRefusals(w(`<image srcset="#a 1x" href="#a"/>`)), [srcset]);
+    assert.deepEqual(svgRefusals(w(`<b/><i/><u/><s/><p/><div/>`)), [`an element that is not an SVG element (\`<b>\`, \`<i>\`, \`<u>\`, \`<s>\`, \`<p>\`, …)`]);
+    // An ordinary chart: mixed-case SVG names, gradients, a filter, markers, text paths, animations.
+    assert.deepEqual(svgRefusals(w(`<defs><linearGradient id="g"><stop offset="0"/></linearGradient><clipPath id="c"><rect/></clipPath><filter id="f"><feGaussianBlur stdDeviation="2"/><feMerge><feMergeNode/></feMerge></filter><marker id="m"><path d="M0 0"/></marker></defs><g clip-path="url(#c)"><polyline points="0,0 1,1"/><text><tspan>p &lt; 0.05</tspan><textPath href="#p">x</textPath></text><circle><animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="2s"/></circle><use href="#m"/></g><title>t</title><desc>d</desc>`)), []);
+  });
+
   it("c2: K1 refuses text evidence that is not UTF-8, so neither scan is blinded", async () => {
     const utf16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>`, "utf16le")]);
     only(await offline(variant((d) => {

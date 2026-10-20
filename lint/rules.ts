@@ -739,6 +739,26 @@ const SVG_ATTR_RE = /(?<![\w.:-])((?:[\w.-]+:)?[\w.-]+)\s*=\s*(?:"([^"]*)"|'([^'
 /** SMIL elements that can set another attribute's value. */
 const SVG_ANIMATION_RE = /^<(?:[\w.-]+:)?(?:animate|set|animateMotion|animateTransform|animateColor)\b/i;
 
+/**
+ * The element names an evidence svg may use (local names, lower case): SVG 1.1/2's drawing, paint, filter,
+ * animation and structure elements. An allowlist fails closed: in an svg inlined into HTML, a start tag such as
+ * `img`, `meta` or `table` breaks out into an HTML element. `script` and `foreignObject` have their own refusals,
+ * and the obsolete font elements stay off, because `<font color|face|size>` is itself a breakout tag.
+ */
+const SVG_ELEMENTS = new Set([
+  "a", "animate", "animatecolor", "animatemotion", "animatetransform", "circle", "clippath", "defs", "desc",
+  "discard", "ellipse", "feblend", "fecolormatrix", "fecomponenttransfer", "fecomposite", "feconvolvematrix",
+  "fediffuselighting", "fedisplacementmap", "fedistantlight", "fedropshadow", "feflood", "fefunca", "fefuncb",
+  "fefuncg", "fefuncr", "fegaussianblur", "feimage", "femerge", "femergenode", "femorphology", "feoffset",
+  "fepointlight", "fespecularlighting", "fespotlight", "fetile", "feturbulence", "filter", "g", "image", "line",
+  "lineargradient", "marker", "mask", "metadata", "mpath", "path", "pattern", "polygon", "polyline",
+  "radialgradient", "rect", "set", "stop", "style", "svg", "switch", "symbol", "text", "textpath", "title",
+  "tspan", "use", "view",
+  "script", "foreignobject",
+]);
+/** Every start or end tag's name. Read over the raw text, comments and CDATA included, so no comment rule can hide one. */
+const SVG_ELEMENT_NAME_RE = /<\/?([A-Za-z_:][^\s/<>]*)/g;
+
 /** The five references XML defines without a DTD (and a DTD is refused). */
 const XML_NAMED_REFS: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
 /** A character reference with a digit run of any length: XML allows any number of leading zeros. */
@@ -846,6 +866,17 @@ export function svgRefusals(text: string): string[] {
   if (svgElement("script").test(text)) out.add("a `<script>` element");
   if (svgElement("foreignObject").test(text)) out.add("a `<foreignObject>` element");
   if (/http:\/\/www\.w3\.org\/1999\/xhtml/i.test(decoded)) out.add("the XHTML namespace (HTML inside the svg)");
+  const foreign = new Set<string>();
+  for (const m of text.matchAll(SVG_ELEMENT_NAME_RE)) {
+    const name = m[1] as string;
+    if (!SVG_ELEMENTS.has(name.slice(name.lastIndexOf(":") + 1).toLowerCase())) foreign.add(name);
+  }
+  if (foreign.size > 0) {
+    const names = [...foreign].slice(0, 5).map((n) => `\`<${n}>\``).join(", ");
+    out.add(`an element that is not an SVG element (${names}${foreign.size > 5 ? ", …" : ""})`);
+  }
+  // `srcset` fetches like `src`; no SVG element takes one.
+  if (/(?<![\w.:-])(?:[\w.-]+:)?srcset\s*=/i.test(decoded)) out.add("a `srcset` attribute (a fetch from outside the file)");
   // An animation rewriting an `href`/`src`, refused wherever it is named, so no tag-scan state can hide it.
   if (/(?<![\w.:-])attributeName\s*=\s*["']?\s*(?:[\w.-]+:)?(?:href|src)\b/i.test(decoded)) {
     out.add("an animation that rewrites an `href` or `src`");

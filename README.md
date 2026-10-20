@@ -341,9 +341,10 @@ carry artifacts — screenshots, diagrams, small data — the way an integration
   files only, each named `[a-z0-9][a-z0-9._-]{0,63}`, added once and never edited, like the finding.
 - **The types**, by extension — and an image by its first bytes too: `png`, `jpg`/`jpeg`, `webp`,
   `svg`, `csv`, `json`, `mmd` (Mermaid), `d2`, `txt`, `log`. Anything else is refused by name. An
-  svg must be inert: no `<script>` (namespace prefix or not), no DTD (`<!DOCTYPE`/`<!ENTITY`), no
+  svg must be inert: SVG elements only (an allowlist, so an HTML tag such as `<img>`, `<meta>` or
+  `<table>` is refused), no `<script>` (namespace prefix or not), no DTD (`<!DOCTYPE`/`<!ENTITY`), no
   `<foreignObject>` or XHTML namespace, no `on…=` event handler, no `href` or `src` other than a
-  `#fragment`, no animation (`animate`, `set`, …) that rewrites an `href`/`src` or holds a URL, no
+  `#fragment`, no `srcset`, no animation (`animate`, `set`, …) that rewrites an `href`/`src` or holds a URL, no
   `srcdoc`, no style that loads from outside the file (`url(…)`, `image-set(…)`, `@import`, a quoted
   function argument — in `style`, `<style>` or any presentation attribute), no backslash (CSS escape) in an attribute or style, and no character reference
   other than a well-formed `&#…;` or the five XML names — every check reads the text with its
