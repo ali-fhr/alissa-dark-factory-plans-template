@@ -11,13 +11,13 @@
 // | bodyOfWork` is a `oneOf`.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { reportKb } from "../plan-lint.ts";
 import {
-  KB_ARCHIVE_HOSTS, KB_DENY_PATTERNS, KB_TOKEN_SHAPE_SOURCES, type KRule, K_RULE_NAMES, discoveryReviewLine, findingsSchema, isDeniedPath, lintKb, secretShapedLines,
-  taskOfBranch,
+  KB_ARCHIVE_HOSTS, KB_DENY_PATTERNS, KB_TOKEN_SHAPE_SOURCES, type KRule, K_RULE_NAMES, discoveryReviewLine, findingsSchema, isDeniedPath, kRulesRan, lintKb, secretShapedLines,
+  svgRefusals, taskOfBranch,
 } from "../rules.ts";
 import { parseFrontmatter, splitFrontmatter } from "../markdown.ts";
 import { readKbDir } from "../source.ts";
@@ -84,10 +84,10 @@ describe("knowledge-base fixtures (c2)", () => {
   });
 
   for (const name of ["kb-golden", "kb-golden-web"]) {
-    it(`${name} passes K1–K8`, async () => {
+    it(`${name} passes K1–K9`, async () => {
       const r = await lintCase(name);
       assert.deepEqual(r.failures, []);
-      assert.deepEqual(r.rulesRun, ["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8"]);
+      assert.deepEqual(r.rulesRun, ["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9"]);
       assert.equal(r.questionCount, 2);
     });
   }
@@ -127,11 +127,11 @@ describe("knowledge-base fixtures (c2)", () => {
     assert.match(await messages("kb-k8-unavailable"), /^plan-lint could not run: URL cite `https:\/\/docs\.example\.com\/flaky` is unavailable \(a 5xx or a timeout\)/);
   });
 
-  it("offline runs K1–K5 only; the K6, K7 and K8 fixtures pass them", async () => {
+  it("offline runs K1–K5 and K9 only; the K6, K7 and K8 fixtures pass them", async () => {
     for (const name of ["kb-golden", "kb-golden-web", "kb-k6-task", "kb-k7-cites", "kb-k8-refuted", "kb-k8-gone", "kb-k8-blocked", "kb-k8-unavailable", "kb-k8-archived"]) {
       const run = await runCli(["--kb", kbFixture(name), "--no-base", "--offline"]);
       assert.equal(run.status, 0, run.stdout + run.stderr);
-      assert.match(run.stdout, /knowledge-base mode — [12] question\(s\) — K1–K5$/m);
+      assert.match(run.stdout, /knowledge-base mode — [12] question\(s\) — K1–K5, K9$/m);
       assert.match(run.stdout, /K6–K8 not run \(offline\)/);
     }
   });
@@ -206,7 +206,7 @@ describe("--pr in the knowledge-base mode (c1, c3)", () => {
     const run = await runCli(prArgs(pr, ["--check-output", out]), cliEnv(api));
     assert.equal(run.status, 0, run.stdout + run.stderr);
     assert.doesNotMatch(run.stdout, /nothing to lint/);
-    assert.match(run.stdout, /^plan-lint: knowledge-base\/2026\/10\/14\/TASK-1234 — knowledge-base mode — 2 question\(s\) — K1–K8$/m);
+    assert.match(run.stdout, /^plan-lint: knowledge-base\/2026\/10\/14\/TASK-1234 — knowledge-base mode — 2 question\(s\) — K1–K9$/m);
     const check = JSON.parse(readFileSync(out, "utf8")) as { conclusion: string; title: string };
     assert.deepEqual(check, { ...check, conclusion: "success", title: "PASS — knowledge-base — knowledge-base/2026/10/14/TASK-1234" });
   });
@@ -728,6 +728,289 @@ describe("schema v1.3 in a plan — sources, a web task's repo, an ask's milesto
     const run = await runCli([dir, "--no-base", "--offline"]);
     assert.equal(run.status, 1);
     assert.match(run.stdout, /FAIL rule 2 .*\/asker is not allowed on this kind of task/);
+  });
+});
+
+// Discovery evidence EV-1 (operator decision 2026-10-20): a finding may carry a flat `evidence/`
+// folder. c1 the golden finding with a cited png and csv passes; c2 K9 refuses an uncited file and
+// a dangling cite, K1 a nested path and a disallowed type, K4 the size caps and K1 an active svg —
+// each by name; c3 K5 scans text evidence, and the integration-check mode is untouched (ic.test.ts).
+describe("evidence/ — K1 types, K4 caps, K5 scan, K9 cites (EV-1)", () => {
+  const EV_TASK = "TASK-1300";
+  before(() => {
+    api.kb.tasks[EV_TASK] = { kind: "discovery", createdAt: Date.UTC(2026, 9, 20, 8, 0), reads: `example-org/service-b@${KB_SHA}` };
+  });
+  /** A copy of the golden evidence finding, to edit; `edit` gets the directory. */
+  const variant = (edit: (dir: string) => void): string => {
+    const dir = join(tempDir("kb-ev"), "knowledge-base", "2026", "10", "20", EV_TASK);
+    cpSync(kbFixture("kb-evidence"), dir, { recursive: true });
+    edit(dir);
+    return dir;
+  };
+  const appendBody = (dir: string, line: string): void => writeFileSync(join(dir, "findings.md"), `${readFileSync(join(dir, "findings.md"), "utf8")}\n${line}\n`);
+  const offline = async (dir: string) => (await lintKb(readKbDir(dir, null), { online: false })).failures;
+  const only = (f: Array<{ rule: string; file?: string; message: string }>, rule: KRule, file: string, re: RegExp): void => {
+    assert.deepEqual([...new Set(f.map((x) => x.rule))], [rule], JSON.stringify(f, null, 2));
+    assert.ok(f.some((x) => x.file === file && re.test(x.message)), JSON.stringify(f, null, 2));
+  };
+
+  it("c1: the golden finding — a cited png and csv — passes K1–K9, through --kb and --pr", async () => {
+    const r = await lintCase("kb-evidence");
+    assert.deepEqual(r.failures, []);
+    assert.deepEqual(r.rulesRun, ["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9"]);
+    const run = await runCli(["--kb", kbFixture("kb-evidence"), "--no-base"], cliEnv(api));
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.match(run.stdout, /K1–K9$/m);
+    const pr = await runCli(prArgs(kbPr("kb-evidence")), cliEnv(api));
+    assert.equal(pr.status, 0, pr.stdout + pr.stderr);
+    assert.match(pr.stdout, /^plan-lint: knowledge-base\/2026\/10\/20\/TASK-1300 — knowledge-base mode — 2 question\(s\) — K1–K9$/m);
+    const off = await runCli(["--kb", kbFixture("kb-evidence"), "--no-base", "--offline"]);
+    assert.equal(off.status, 0, off.stdout);
+    assert.match(off.stdout, /— K1–K5, K9$/m);
+  });
+
+  it("c2: K9 refuses an uncited evidence file, naming it", async () => {
+    only(await offline(variant((d) => writeFileSync(join(d, "evidence", "extra.txt"), "a stray note\n"))), "K9", "evidence/extra.txt", /is never cited/);
+  });
+
+  it("c2: K9 refuses a dangling cite, inline or in a question's cites", async () => {
+    only(await offline(variant((d) => appendBody(d, "The old page [evidence:settings-1280.png]."))), "K9", "findings.md", /`evidence:settings-1280\.png` is cited, but `evidence\/settings-1280\.png` is not in the folder/);
+    only(await offline(variant((d) => rmSync(join(d, "evidence", "counts.csv")))), "K9", "findings.md", /`evidence:counts\.csv` is cited/);
+  });
+
+  it("c2: K1 refuses a nested path, a disallowed type, a bad name, a symlink and an image whose bytes are not its type", async () => {
+    only(await offline(variant((d) => {
+      mkdirSync(join(d, "evidence", "shots"));
+      writeFileSync(join(d, "evidence", "shots", "a.png"), readFileSync(join(d, "evidence", "settings-1440.png")));
+    })), "K1", undefined as unknown as string, /`evidence\/shots` is a nested path/);
+    only(await offline(variant((d) => {
+      writeFileSync(join(d, "evidence", "run.exe"), "MZ");
+      appendBody(d, "The tool [evidence:run.exe].");
+    })), "K1", "evidence/run.exe", /is a `\.exe` file — evidence is png, jpg, jpeg, webp, svg, csv, json, mmd, d2, txt, log only/);
+    only(await offline(variant((d) => {
+      writeFileSync(join(d, "evidence", "Notes.txt"), "x\n");
+      appendBody(d, "The note [evidence:Notes.txt].");
+    })), "K1", "evidence/Notes.txt", /is not named `\[a-z0-9\]\[a-z0-9\._-\]\{0,63\}`/);
+    only(await offline(variant((d) => symlinkSync("/etc/hostname", join(d, "evidence", "host.txt")))), "K1", undefined as unknown as string, /`evidence\/host\.txt` is a symbolic link/);
+    only(await offline(variant((d) => writeFileSync(join(d, "evidence", "settings-1440.png"), "not an image\n"))), "K1", "evidence/settings-1440.png", /is named `\.png`, but its bytes are not a PNG/);
+  });
+
+  it("c2: K1 refuses an svg with a script, an event handler or an external href; an inert svg passes", async () => {
+    const svg = (dir: string, body: string): void => {
+      writeFileSync(join(dir, "evidence", "flow.svg"), `<svg xmlns="http://www.w3.org/2000/svg">${body}</svg>\n`);
+      appendBody(dir, "The flow [evidence:flow.svg].");
+    };
+    only(await offline(variant((d) => svg(d, "<script>alert(1)</script>"))), "K1", "evidence/flow.svg", /carrying a `<script>` element/);
+    only(await offline(variant((d) => svg(d, `<rect onload="x()"/>`))), "K1", "evidence/flow.svg", /an event-handler attribute/);
+    only(await offline(variant((d) => svg(d, `<a href="https://example.com/x"><text>x</text></a>`))), "K1", "evidence/flow.svg", /an `href` or `src` that leaves the file/);
+    assert.deepEqual(await offline(variant((d) => svg(d, `<defs><linearGradient id="g"/></defs><use href="#g"/><rect fill="url(#g)"><animate attributeName="opacity" values="0;1" dur="2s"/></rect>`))), []);
+    assert.deepEqual(svgRefusals(`<image xlink:href='data:image/png;base64,AAAA'/>`), ["an `href` or `src` that leaves the file (only `#fragment` links are admitted)"]);
+  });
+
+  // PR #8 round 1: the vectors the first svg check let through, one row each.
+  it("c2: K1 refuses a prefixed script, a DTD, a `/`-separated handler, href animation, foreignObject and src", async () => {
+    only(await offline(variant((d) => {
+      writeFileSync(join(d, "evidence", "flow.svg"), `<svg xmlns="http://www.w3.org/2000/svg" xmlns:s="http://www.w3.org/2000/svg"><s:script>alert(1)</s:script></svg>\n`);
+      appendBody(d, "The flow [evidence:flow.svg].");
+    })), "K1", "evidence/flow.svg", /carrying a `<script>` element/);
+    const rows: Array<[string, string]> = [
+      [`<!DOCTYPE svg [<!ENTITY s "&#60;script>alert(1)&#60;/script>">]><svg xmlns="http://www.w3.org/2000/svg">&s;</svg>`, "a DTD (`<!DOCTYPE` or `<!ENTITY`)"],
+      [`<svg/onload=alert(1)>`, "an event-handler attribute (`on…=`)"],
+      [`<svg><rect title="a>b" onclick="x()"/></svg>`, "an event-handler attribute (`on…=`)"],
+      [`<svg><a><animate attributeName="href" values="javascript:alert(1)"/><text>x</text></a></svg>`, "an animation that rewrites an `href` or `src`"],
+      [`<svg><a><set attributeName="xlink:href" to="https://evil.example/"/><text>x</text></a></svg>`, "an animation that rewrites an `href` or `src`"],
+      [`<svg><a><set attributeName="&#104;ref" to="#x"/><text>x</text></a></svg>`, "an animation that rewrites an `href` or `src`"],
+      [`<svg><rect><animate attributeName="fill" values="url(https://evil.example/p)"/></rect></svg>`, "an animation whose values hold a URL"],
+      [`<svg><foreignObject><img xmlns="http://www.w3.org/1999/xhtml" src="https://evil.example/t.png"/></foreignObject></svg>`, "a `<foreignObject>` element"],
+      [`<svg><h:img xmlns:h="http://www.w3.org/1999/xhtml"/></svg>`, "the XHTML namespace (HTML inside the svg)"],
+      [`<svg><image src="https://evil.example/t.png"/></svg>`, "an `href` or `src` that leaves the file (only `#fragment` links are admitted)"],
+    ];
+    for (const [text, why] of rows) assert.ok(svgRefusals(text).includes(why), `${text} → ${JSON.stringify(svgRefusals(text))}`);
+  });
+
+  // PR #8 round 2: overlong and undecodable references, and the whole-text checks over decoded text.
+  it("c2: K1 decodes every character reference before the svg checks, and refuses one it cannot decode", async () => {
+    only(await offline(variant((d) => {
+      writeFileSync(join(d, "evidence", "flow.svg"), `<svg xmlns="http://www.w3.org/2000/svg"><a><animate attributeName="&#0000000104;ref" values="&#0000000106;avascript&#0000000058;alert(1)"/><text>x</text></a></svg>\n`);
+      appendBody(d, "The flow [evidence:flow.svg].");
+    })), "K1", "evidence/flow.svg", /an animation that rewrites an `href` or `src`/);
+    const ref = "a character reference that is not a well-formed XML one (`&#…;`, `&amp;`, `&lt;`, `&gt;`, `&quot;`, `&apos;`)";
+    const esc = "a backslash (CSS escape) in an attribute or a style";
+    const loads = "a style that loads from outside the file (`url(…)`, `image-set(…)` or `@import`)";
+    const rows: Array<[string, string]> = [
+      [`<svg><a><animate attributeName="&#0000000104;ref" values="&#0000000106;avascript&#0000000058;alert(1)"/><text>x</text></a></svg>`, "an animation whose values hold a URL"],
+      [`<svg><a><set attributeName="&#x0000068;ref" to="&#x000006a;avascript&#x000003a;x"/><text>x</text></a></svg>`, "an animation that rewrites an `href` or `src`"],
+      [`<svg><a><set attributeName="&#x0000068;ref" to="&#x000006a;avascript&#x000003a;x"/><text>x</text></a></svg>`, "an animation whose values hold a URL"],
+      [`<svg><a><set attributeName="&#x110000;ref" to="#x"/></a></svg>`, ref],
+      [`<svg><a><set attributeName="&#00000000000000000000104;ref" to="#x"/></a></svg>`, "an animation that rewrites an `href` or `src`"],
+      [`<svg><a><set attributeName="href" to="&#106avascript:x"/></a></svg>`, ref],
+      [`<svg><a><set attributeName="href" to="javascript&colon;x"/></a></svg>`, ref],
+      [`<svg><text>&#0;</text></svg>`, ref],
+      [`<svg><g xmlns:h="http&#x3a;//www.w3.org/1999/xhtml"><h:iframe srcdoc="&lt;script&gt;alert(1)&lt;/script&gt;"/></g></svg>`, "the XHTML namespace (HTML inside the svg)"],
+      [`<svg><g xmlns:h="http&#x3a;//www.w3.org/1999/xhtml"><h:iframe srcdoc="&lt;script&gt;alert(1)&lt;/script&gt;"/></g></svg>`, "a `srcdoc` attribute (an HTML document inside the svg)"],
+      [`<svg><rect style="fill:u&#114;l(https://evil.example/p.svg#a)"/></svg>`, loads],
+      [`<svg><style>rect { fill: u&#114;l(https://evil.example/p.svg#a) }</style></svg>`, loads],
+      [`<svg><style>&#64;import "https://evil.example/x.css";</style></svg>`, loads],
+      [`<svg><rect style="fill:\\75rl(https://evil.example/p.svg#a)"/></svg>`, esc],
+      [`<svg><style>rect { fill: \\75rl(https://evil.example/p.svg#a) }</style></svg>`, esc],
+      [`<svg><style>@\\69mport "https://evil.example/x.css";</style></svg>`, esc],
+      [`<svg><style>rect { fill: &#92;75rl(https://evil.example/p.svg#a) }</style></svg>`, esc],
+      [`<svg><rect fill="\\75rl(https://evil.example/p.svg#a)"/></svg>`, esc],
+      [`<svg><rect style="background:image-set(&quot;https://evil.example/p.png&quot; 1x)"/></svg>`, loads],
+      [`<svg><style>rect { background: -webkit-image-set("https://evil.example/p.png" 1x) }</style></svg>`, loads],
+      [`<svg><style>rect { background: image("https://evil.example/p.png") }</style></svg>`, "a style function with a quoted argument other than a `#fragment`"],
+    ];
+    for (const [text, why] of rows) assert.ok(svgRefusals(text).includes(why), `${text} → ${JSON.stringify(svgRefusals(text))}`);
+    // Ordinary charts still pass: the five XML references, numeric ones, a bare `&`, a style with url(#id).
+    assert.deepEqual(svgRefusals(`<svg xmlns="http://www.w3.org/2000/svg"><style>.a { fill: url("#g"); font-family: "Inter", sans-serif }</style><text>p &lt; 0.05 &amp; n &#8805; 30 &#x2014; R&D</text><rect class="a" style="opacity:0.5"/></svg>`), []);
+  });
+
+  // PR #8 round 3: presentation attributes are CSS, and the URL parser strips whitespace inside a quoted url().
+  it("c3: K1 refuses a presentation attribute whose quoted url() starts with whitespace", async () => {
+    only(await offline(variant((d) => {
+      writeFileSync(join(d, "evidence", "flow.svg"), `<svg xmlns="http://www.w3.org/2000/svg"><rect fill="url(' https://evil.example/p.svg#a')"/></svg>\n`);
+      appendBody(d, "The flow [evidence:flow.svg].");
+    })), "K1", "evidence/flow.svg", /a style that loads from outside the file/);
+    const quoted = "a style function with a quoted argument other than a `#fragment`";
+    const loads = "a style that loads from outside the file (`url(…)`, `image-set(…)` or `@import`)";
+    const inputs = [
+      `<svg><rect fill="url(' https://evil.example/p.svg#a')"/></svg>`,
+      `<svg><rect filter="url(&quot; https://evil.example/f.svg#f&quot;)"/></svg>`,
+      `<svg><rect cursor="url(' https://evil.example/c.png'), auto"/></svg>`,
+      `<svg><path marker-start="url('&#9;https://evil.example/m.svg#m')"/></svg>`,
+      `<svg><rect mask="url('\thttps://evil.example/k.svg#k')"/></svg>`,
+    ];
+    for (const text of inputs) {
+      const got = svgRefusals(text);
+      assert.ok(got.includes(quoted) && got.includes(loads), `${text} → ${JSON.stringify(got)}`);
+    }
+    // Each half alone: the whole-text url( check (an unparsed processing instruction) and the attribute check.
+    assert.ok(svgRefusals(`<?x url(' https://evil.example/p.svg')?><svg/>`).includes(loads));
+    assert.ok(svgRefusals(`<svg><rect clip-path="image(' https://evil.example/p.png')"/></svg>`).includes(quoted));
+    // A fragment with whitespace around it is still a fragment.
+    assert.deepEqual(svgRefusals(`<svg xmlns="http://www.w3.org/2000/svg"><rect fill="url(' #g')" filter="url(#f)" mask="url( &quot;#m&quot; )"/></svg>`), []);
+  });
+
+  // PR #8 round 4: a quote inside a comment, CDATA section or PI merged the tags after it into one span, hiding an animation.
+  it("c3: K1 refuses an href animation behind a quote in a comment, CDATA section or processing instruction", async () => {
+    only(await offline(variant((d) => {
+      writeFileSync(join(d, "evidence", "flow.svg"), `<svg xmlns="http://www.w3.org/2000/svg"><!-- Q1's numbers --><a><animate attributeName="href" values="https://evil.example/"/><text>x</text></a><!-- Q2's numbers --></svg>\n`);
+      appendBody(d, "The flow [evidence:flow.svg].");
+    })), "K1", "evidence/flow.svg", /an animation that rewrites an `href` or `src`/);
+    const rewrites = "an animation that rewrites an `href` or `src`";
+    const url = "an animation whose values hold a URL";
+    const w = (s: string): string => `<svg xmlns="http://www.w3.org/2000/svg">${s}</svg>`;
+    const inputs = [
+      `<!-- ' --><a><set attributeName="href" to="javascript:alert(1)"/><text>x</text></a><!-- ' -->`,
+      `<!-- Q1's numbers --><a><animate attributeName="href" values="https://evil.example/"/><text>x</text></a><!-- Q2's numbers -->`,
+      `<![CDATA[ " ]]><a><set attributeName="xlink:href" to="javascript:alert(1)"/></a><![CDATA[ " ]]>`,
+      `<?note ' ?><a><set attributeName="href" to="javascript:alert(1)"/></a><?note ' ?>`,
+    ];
+    for (const text of inputs) {
+      const got = svgRefusals(w(text));
+      assert.ok(got.includes(rewrites) && got.includes(url), `${text} → ${JSON.stringify(got)}`);
+    }
+    // Each half alone: the whole-text attributeName check (on no animation tag at all) and the blanked tag scan.
+    assert.deepEqual(svgRefusals(w(`<rect attributeName = ' &#104;ref'/>`)), [rewrites]);
+    assert.deepEqual(svgRefusals(w(`<!-- ' --><set attributeName="fill" to="javascript:alert(1)"/><!-- ' -->`)), [url]);
+    // An unterminated carrier is blanked to the end; ordinary chart text with an apostrophe in a comment passes.
+    assert.ok(svgRefusals(w(`<set attributeName="fill" to="javascript:x"/><!-- ' `)).includes(url));
+    assert.deepEqual(svgRefusals(w(`<!-- Q1's numbers --><rect><animate attributeName="opacity" values="0;1" dur="1s"/></rect><![CDATA[ it's ]]><?note ' ?>`)), []);
+  });
+
+  it("c3: K1 refuses any element that is not an SVG element (HTML breakout tags), and `srcset`", async () => {
+    only(await offline(variant((d) => {
+      writeFileSync(join(d, "evidence", "flow.svg"), `<svg xmlns="http://www.w3.org/2000/svg"><table background="https://evil.example/t.png"></table></svg>\n`);
+      appendBody(d, "The flow [evidence:flow.svg].");
+    })), "K1", "evidence/flow.svg", /an element that is not an SVG element \(`<table>`\)/);
+    const foreign = (...names: string[]): string => `an element that is not an SVG element (${names.map((n) => `\`<${n}>\``).join(", ")})`;
+    const srcset = "a `srcset` attribute (a fetch from outside the file)";
+    const w = (s: string): string => `<svg xmlns="http://www.w3.org/2000/svg">${s}</svg>`;
+    // The reviewer's three inputs.
+    assert.deepEqual(svgRefusals(w(`<img srcset="https://evil.example/t.png 1x"/>`)), [foreign("img"), srcset]);
+    assert.deepEqual(svgRefusals(w(`<meta http-equiv="refresh" content="0;url=https://evil.example/"/>`)), [foreign("meta")]);
+    assert.deepEqual(svgRefusals(w(`<table background="https://evil.example/t.png"></table>`)), [foreign("table")]);
+    // Case, a prefix, a font breakout, an end-tag breakout (`</p>` makes a <p>, named without its slash), a tag hidden in a comment, and srcset on an SVG element.
+    assert.deepEqual(svgRefusals(w(`<IMG src="#a"/>`)), [foreign("IMG")]);
+    assert.deepEqual(svgRefusals(w(`<s:embed/>`)), [foreign("s:embed")]);
+    assert.deepEqual(svgRefusals(w(`<font color="red">x</font>`)), [foreign("font")]);
+    assert.deepEqual(svgRefusals(w(`<text>a</p>b</text>`)), [foreign("p")]);
+    assert.deepEqual(svgRefusals(w(`<!--><img/>-->`)), [foreign("img")]);
+    assert.deepEqual(svgRefusals(w(`<image srcset="#a 1x" href="#a"/>`)), [srcset]);
+    assert.deepEqual(svgRefusals(w(`<b/><i/><u/><s/><p/><div/>`)), [`an element that is not an SVG element (\`<b>\`, \`<i>\`, \`<u>\`, \`<s>\`, \`<p>\`, …)`]);
+    // An ordinary chart: mixed-case SVG names, gradients, a filter, markers, text paths, animations.
+    assert.deepEqual(svgRefusals(w(`<defs><linearGradient id="g"><stop offset="0"/></linearGradient><clipPath id="c"><rect/></clipPath><filter id="f"><feGaussianBlur stdDeviation="2"/><feMerge><feMergeNode/></feMerge></filter><marker id="m"><path d="M0 0"/></marker></defs><g clip-path="url(#c)"><polyline points="0,0 1,1"/><text><tspan>p &lt; 0.05</tspan><textPath href="#p">x</textPath></text><circle><animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="2s"/></circle><use href="#m"/></g><title>t</title><desc>d</desc>`)), []);
+  });
+
+  it("c2: K1 refuses text evidence that is not UTF-8, so neither scan is blinded", async () => {
+    const utf16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>`, "utf16le")]);
+    only(await offline(variant((d) => {
+      writeFileSync(join(d, "evidence", "flow.svg"), utf16);
+      appendBody(d, "The flow [evidence:flow.svg].");
+    })), "K1", "evidence/flow.svg", /starts with a UTF-16 or UTF-32 byte-order mark/);
+    only(await offline(variant((d) => writeFileSync(join(d, "evidence", "counts.csv"), Buffer.from([0x6b, 0x2c, 0xc3, 0x28, 0x0a])))), "K1", "evidence/counts.csv", /is not valid UTF-8/);
+    only(await offline(variant((d) => writeFileSync(join(d, "evidence", "counts.csv"), "k,v\na,\u0000\n"))), "K1", "evidence/counts.csv", /holds a NUL byte/);
+    assert.deepEqual(await offline(variant((d) => writeFileSync(join(d, "evidence", "counts.csv"), "\ufeffk,v\na,1\n"))), []);
+  });
+
+  it("K9: `evidence:` inside a URL, a path or a longer word is not a cite", async () => {
+    assert.deepEqual(await offline(variant((d) => appendBody(d, "See https://host.example/evidence:foo.png and a.evidence:bar.png and x:evidence:baz.png."))), []);
+  });
+
+  it("c2: K4 caps a file at 2 MB, the folder at 10 MB and 20 files, by name", async () => {
+    only(await offline(variant((d) => {
+      writeFileSync(join(d, "evidence", "big.log"), "x".repeat(2 * 1024 * 1024 + 1));
+      appendBody(d, "The log [evidence:big.log].");
+    })), "K4", "evidence/big.log", /is 2097153 bytes; an evidence file is at most 2097152/);
+    const total = await offline(variant((d) => {
+      for (let i = 0; i < 6; i++) {
+        writeFileSync(join(d, "evidence", `part-${i}.log`), "x".repeat(1900 * 1024));
+        appendBody(d, `Part [evidence:part-${i}.log].`);
+      }
+    }));
+    assert.deepEqual([...new Set(total.map((f) => f.rule))], ["K4"]);
+    assert.match(total.map((f) => f.message).join("\n"), /the evidence is \d+ bytes in all; at most 10485760/);
+    const many = await offline(variant((d) => {
+      for (let i = 0; i < 19; i++) {
+        writeFileSync(join(d, "evidence", `n-${i}.txt`), "n\n");
+        appendBody(d, `Note [evidence:n-${i}.txt].`);
+      }
+    }));
+    assert.deepEqual(many.map((f) => `${f.rule} ${f.message}`), ["K4 the finding carries 21 evidence files; at most 20"]);
+  });
+
+  it("c3: K5 scans every text evidence file for secrets, and names the file but never the secret", async () => {
+    const key = ["AK", "IA", "Z".repeat(16)].join("");
+    const f = await offline(variant((d) => writeFileSync(join(d, "evidence", "counts.csv"), `key,value\nAWS_KEY,${key}\n`)));
+    only(f, "K5", "evidence/counts.csv", /secret-shaped text on line\(s\) 2/);
+    assert.doesNotMatch(JSON.stringify(f), new RegExp(key));
+    only(await offline(variant((d) => {
+      writeFileSync(join(d, "evidence", "trace.json"), `{"token": "${["gh", "p_", "A".repeat(36)].join("")}"}\n`);
+      appendBody(d, "The trace [evidence:trace.json].");
+    })), "K5", "evidence/trace.json", /secret-shaped text on line\(s\) 1/);
+  });
+
+  it("K2: a frontmatter evidence cite needs schema v1.2, and names a well-formed file", async () => {
+    const v11 = await offline(variant((d) => writeFileSync(join(d, "findings.md"), readFileSync(join(d, "findings.md"), "utf8").replace("alissa-findings/v1.2", "alissa-findings/v1.1"))));
+    assert.deepEqual([...new Set(v11.map((f) => f.rule))], ["K2"], JSON.stringify(v11));
+    assert.match(v11.map((f) => f.message).join("\n"), /\/questions\/0\/cites\/1 is an evidence cite — it needs `schema: alissa-findings\/v1\.2`/);
+    const bad = await offline(variant((d) => writeFileSync(join(d, "findings.md"), readFileSync(join(d, "findings.md"), "utf8").replace("file: counts.csv }", "file: ../counts.csv }"))));
+    assert.ok(bad.some((f) => f.rule === "K2" && /\/questions\/0\/cites\/1\/file must match pattern/.test(f.message)), JSON.stringify(bad));
+  });
+
+  it("--pr: an evidence file is added like findings.md; a nested path or a file beside evidence/ is refused by K1", async () => {
+    const dir = "knowledge-base/2026/10/20/TASK-1300";
+    const nested = await runCli(prArgs(kbPr("kb-evidence", { also: { [`${dir}/evidence/shots/a.txt`]: "x\n", [`${dir}/notes.md`]: "x\n" } }), ["--offline"]));
+    assert.equal(nested.status, 1, nested.stdout);
+    assert.match(nested.stdout, /K1 \(layout and immutability\): `evidence\/shots\/a\.txt` is a nested path/);
+    assert.match(nested.stdout, /`notes\.md` does not belong in a findings directory — it holds `findings\.md` and, optionally, `evidence\/<file>` \(flat\)/);
+  });
+
+  it("the report names the rules a run made, with gaps", () => {
+    assert.equal(kRulesRan(["K1", "K2", "K3", "K4", "K5", "K9"]), "K1–K5, K9");
+    assert.equal(kRulesRan(["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9"]), "K1–K9");
+    assert.equal(kRulesRan(["K1", "K5"]), "K1, K5");
+    assert.equal(kRulesRan(["K1", "K4", "K5"]), "K1, K4, K5");
   });
 });
 

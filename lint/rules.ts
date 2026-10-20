@@ -10,7 +10,9 @@ import { charLength, level2Sections, listItems, parseFrontmatter, splitFrontmatt
 import {
   DAG_BEGIN, DAG_END, SUMMARY_BEGIN, SUMMARY_END, isRecord, oneLine, readRegion, renderDag, renderSummary, taskView, type TaskView,
 } from "./render.ts";
-import { EVIDENCE_DIR, FINDINGS_FILE, type IcSource, type KbSource, type PlanSource, REPORT_FILE, isTaskPath } from "./source.ts";
+import {
+  EVIDENCE_DIR, FINDINGS_FILE, type IcSource, KB_EVIDENCE_READ_CAP, KB_EVIDENCE_TYPES, type KbSource, type PlanSource, REPORT_FILE, extensionOf, isKbTextEvidence, isTaskPath,
+} from "./source.ts";
 
 /** A §5.5 rule number, or `5b` — the scope-path preflight, which runs with the online rules. */
 export type RuleId = number | "5b";
@@ -665,16 +667,18 @@ function sortFailures(f: Failure[]): Failure[] {
   return f.map((x, i) => ({ x, i })).sort((a, b) => ruleRank(a.x.rule) - ruleRank(b.x.rule) || a.i - b.i).map(({ x }) => x);
 }
 
-// ── The knowledge-base mode: K1–K8 (design alissa-build-discovery §3.4) ──────────────────────────
+// ── The knowledge-base mode: K1–K9 (design alissa-build-discovery §3.4) ──────────────────────────
 // A pull request that changes any `knowledge-base/**` file is linted under these rules, numbered
 // apart from §5.5's. K1–K5 need no network; K6 reads the task with the lint token, K7 asks
 // Studio's verify route whether each repo cite holds at its pinned SHA, and K8 (v1.1) asks Studio's
 // url-cites route whether each URL cite's page, or its archive, still holds the quote. Every rule
 // runs; the verdict is the first failure. K7 or K8 with the route unavailable is "plan-lint could
 // not run" — a failure, never a pass. The same run classifies the finding for review: its report
-// ends with the `Discovery-Review:` line (§3.6).
+// ends with the `Discovery-Review:` line (§3.6). A finding may carry a flat `evidence/` folder
+// (operator decision 2026-10-20): K1 types it, K4 caps it, K5 scans its text and K9 — offline, like
+// K1–K5 — holds every file and every `evidence:<file>` cite to each other.
 
-export type KRule = "K1" | "K2" | "K3" | "K4" | "K5" | "K6" | "K7" | "K8";
+export type KRule = "K1" | "K2" | "K3" | "K4" | "K5" | "K6" | "K7" | "K8" | "K9";
 
 export const K_RULE_NAMES: Readonly<Record<KRule, string>> = {
   K1: "layout and immutability",
@@ -685,7 +689,20 @@ export const K_RULE_NAMES: Readonly<Record<KRule, string>> = {
   K6: "task",
   K7: "cites resolve",
   K8: "external cites hold",
+  K9: "evidence cited",
 };
+
+/** The rules a run made, as the report names them: `K1–K5, K9`, `K1–K9`, `K1, K5`. */
+export function kRulesRan(rules: readonly KRule[]): string {
+  const ns = rules.map((r) => Number(r.slice(1)));
+  const runs: Array<[number, number]> = [];
+  for (const n of ns) {
+    const last = runs.at(-1);
+    if (last && n === last[1] + 1) last[1] = n;
+    else runs.push([n, n]);
+  }
+  return runs.map(([a, b]) => (a === b ? `K${a}` : b === a + 1 ? `K${a}, K${b}` : `K${a}–K${b}`)).join(", ");
+}
 
 /** §2.3's limits, and §2.5's for URL cites. */
 export const KB_LIMITS = {
@@ -695,11 +712,237 @@ export const KB_LIMITS = {
   lineSpanMax: 400,
   summaryChars: 1200, questionSectionChars: 6000,
   urlCitesMax: 48, urlChars: 2048, quoteMin: 20, quoteMax: 300,
+  evidenceFileBytes: KB_EVIDENCE_READ_CAP, evidenceBytesMax: 10 * 1024 * 1024, evidenceFilesMax: 20,
 } as const;
+
+/** An evidence file's name (K1): lower case, at most 64 characters. */
+export const KB_EVIDENCE_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+/** An inline evidence cite in findings.md (K9): `evidence:<file>`, not inside a longer word, path or URL. */
+const INLINE_EVIDENCE_RE = /(?<![A-Za-z0-9_./:-])evidence:([a-z0-9][a-z0-9._-]{0,63})/g;
+
+/** Why an image's bytes are not its extension's type (K1), or null. */
+function imageMismatch(ext: string, b: Buffer): string | null {
+  const is = (sig: number[], at = 0): boolean => sig.every((x, i) => b[at + i] === x);
+  const ascii = (t: string): number[] => [...t].map((c) => c.charCodeAt(0));
+  if (ext === "png") return is([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) ? null : "a PNG";
+  if (ext === "jpg" || ext === "jpeg") return is([0xff, 0xd8, 0xff]) ? null : "a JPEG";
+  if (ext === "webp") return is(ascii("RIFF")) && is(ascii("WEBP"), 8) ? null : "a WebP image";
+  return null;
+}
+
+/** An element name, after an optional namespace prefix (`<s:script`, `<script`). */
+const svgElement = (name: string): RegExp => new RegExp(`<(?:[\\w.-]+:)?${name}\\b`, "i");
+/** One tag, quote-aware, so a `>` inside an attribute value does not end it. Linear: no two branches start alike. */
+const SVG_TAG_RE = /<[^<>"']*(?:(?:"[^"]*"|'[^']*')[^<>"']*)*>/g;
+/** One attribute of a tag: its (possibly prefixed) name and its value. */
+const SVG_ATTR_RE = /(?<![\w.:-])((?:[\w.-]+:)?[\w.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>]+))/g;
+/** SMIL elements that can set another attribute's value. */
+const SVG_ANIMATION_RE = /^<(?:[\w.-]+:)?(?:animate|set|animateMotion|animateTransform|animateColor)\b/i;
+
+/**
+ * The element names an evidence svg may use (local names, lower case): SVG 1.1/2's drawing, paint, filter,
+ * animation and structure elements. An allowlist fails closed: in an svg inlined into HTML, a start tag such as
+ * `img`, `meta` or `table` breaks out into an HTML element. `script` and `foreignObject` have their own refusals,
+ * and the obsolete font elements stay off, because `<font color|face|size>` is itself a breakout tag.
+ */
+const SVG_ELEMENTS = new Set([
+  "a", "animate", "animatecolor", "animatemotion", "animatetransform", "circle", "clippath", "defs", "desc",
+  "discard", "ellipse", "feblend", "fecolormatrix", "fecomponenttransfer", "fecomposite", "feconvolvematrix",
+  "fediffuselighting", "fedisplacementmap", "fedistantlight", "fedropshadow", "feflood", "fefunca", "fefuncb",
+  "fefuncg", "fefuncr", "fegaussianblur", "feimage", "femerge", "femergenode", "femorphology", "feoffset",
+  "fepointlight", "fespecularlighting", "fespotlight", "fetile", "feturbulence", "filter", "g", "image", "line",
+  "lineargradient", "marker", "mask", "metadata", "mpath", "path", "pattern", "polygon", "polyline",
+  "radialgradient", "rect", "set", "stop", "style", "svg", "switch", "symbol", "text", "textpath", "title",
+  "tspan", "use", "view",
+  "script", "foreignobject",
+]);
+/** Every start or end tag's name. Read over the raw text, comments and CDATA included, so no comment rule can hide one. */
+const SVG_ELEMENT_NAME_RE = /<\/?([A-Za-z_:][^\s/<>]*)/g;
+
+/** The five references XML defines without a DTD (and a DTD is refused). */
+const XML_NAMED_REFS: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
+/** A character reference with a digit run of any length: XML allows any number of leading zeros. */
+const CHAR_REF_RE = /&(?:#(\d+)|#x([0-9a-f]+)|(amp|lt|gt|quot|apos));/gi;
+
+/** A reference's code point, or null when it is not an XML Char (NUL, a control, a surrogate, past U+10FFFF). */
+function refCodePoint(d: string | undefined, h: string | undefined): number | null {
+  const digits = (d ?? h ?? "").replace(/^0+(?=.)/, "");
+  if (digits.length > 7) return null;
+  const cp = Number.parseInt(digits, d !== undefined ? 10 : 16);
+  const xmlChar = cp === 0x9 || cp === 0xa || cp === 0xd || (cp >= 0x20 && cp <= 0xd7ff) || (cp >= 0xe000 && cp <= 0xfffd) || (cp >= 0x10000 && cp <= 0x10ffff);
+  return xmlChar ? cp : null;
+}
+
+/** Text with its character references decoded, as the XML parser reads it. An undecodable one becomes U+FFFD (and is refused, see badRef). */
+function decodeRefs(v: string): string {
+  return v.replace(CHAR_REF_RE, (_, d, h, n) => {
+    if (n) return XML_NAMED_REFS[n.toLowerCase()] as string;
+    const cp = refCodePoint(d, h);
+    return cp === null ? "\ufffd" : String.fromCodePoint(cp);
+  });
+}
+
+/**
+ * Whether the text holds a reference that is not a well-formed XML one with a valid code point: an
+ * `&#` not closed by `;`, a `;`-closed named reference other than the five (`&colon;`, which HTML decodes), or
+ * one decoding to no XML Char. Failing closed keeps every check on the same text a viewer reads.
+ */
+function badRef(text: string): boolean {
+  // A name with no `;` (`R&D`) is left alone: no parser turns one into a letter or a `:`.
+  for (const m of text.matchAll(/&(#x?[0-9a-z]*;?|[a-z][a-z0-9]*;)/gi)) {
+    const ref = m[1] as string;
+    const num = /^#(?:(\d+)|x([0-9a-f]+));$/i.exec(ref);
+    if (num) {
+      if (refCodePoint(num[1], num[2]) === null) return true;
+    } else if (ref.startsWith("#") || !/^(?:amp|lt|gt|quot|apos);$/i.test(ref)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Each `<style>` element's content (to its close tag, or the end of the text), scanned linearly. */
+function styleContents(text: string): string[] {
+  const out: string[] = [];
+  let open = -1;
+  for (const m of text.matchAll(/<(\/?)(?:[\w.-]+:)?style\b[^<>]*>/gi)) {
+    const end = (m.index as number) + m[0].length;
+    if (m[1] === "" && open < 0) open = end;
+    else if (m[1] === "/" && open >= 0) {
+      out.push(text.slice(open, m.index));
+      open = -1;
+    }
+  }
+  if (open >= 0) out.push(text.slice(open));
+  return out;
+}
+
+/** A CSS escape (`\75rl(`, `@\69mport`) hides a keyword from every check here; presentation attributes are CSS too. */
+const CSS_ESCAPE = "a backslash (CSS escape) in an attribute or a style";
+
+/** Why a (decoded) style is not plain, or null: a CSS escape, or a quoted function argument that may fetch (`image(`, `src(`, …). */
+function styleRefusal(css: string): string | null {
+  if (css.includes("\\")) return CSS_ESCAPE;
+  if (/[\w-]\(\s*["'](?!\s*#)/.test(css)) return "a style function with a quoted argument other than a `#fragment`";
+  return null;
+}
+
+/**
+ * The text with each comment, CDATA section and processing instruction blanked to spaces (same length), so a
+ * quote inside one cannot merge the tags after it into one span. Linear: one `indexOf` per carrier; an
+ * unterminated one is blanked to the end.
+ */
+function blankNonMarkup(text: string): string {
+  const carriers: [string, string][] = [["<!--", "-->"], ["<![CDATA[", "]]>"], ["<?", "?>"]];
+  const parts: string[] = [];
+  let kept = 0;
+  for (let lt = text.indexOf("<"); lt >= 0; ) {
+    const c = carriers.find(([open]) => text.startsWith(open, lt));
+    if (!c) {
+      lt = text.indexOf("<", lt + 1);
+      continue;
+    }
+    const close = text.indexOf(c[1], lt + c[0].length);
+    const end = close < 0 ? text.length : close + c[1].length;
+    parts.push(text.slice(kept, lt), " ".repeat(end - lt));
+    kept = end;
+    lt = text.indexOf("<", end);
+  }
+  parts.push(text.slice(kept));
+  return parts.join("");
+}
+
+/**
+ * What makes an svg active or a fetch (K1): a DTD, a script, an HTML island, an event handler, an
+ * `href`/`src` off the page, an animation that rewrites one, a style that loads. Never the text itself.
+ */
+export function svgRefusals(text: string): string[] {
+  const out = new Set<string>();
+  // A DTD can declare entities that expand into elements; evidence never needs one.
+  if (/<!(?:DOCTYPE|ENTITY)\b/i.test(text)) out.add("a DTD (`<!DOCTYPE` or `<!ENTITY`)");
+  if (badRef(text)) out.add("a character reference that is not a well-formed XML one (`&#…;`, `&amp;`, `&lt;`, `&gt;`, `&quot;`, `&apos;`)");
+  // The parser decodes references everywhere, so the whole-text checks read the decoded text.
+  const decoded = decodeRefs(text);
+  if (svgElement("script").test(text)) out.add("a `<script>` element");
+  if (svgElement("foreignObject").test(text)) out.add("a `<foreignObject>` element");
+  if (/http:\/\/www\.w3\.org\/1999\/xhtml/i.test(decoded)) out.add("the XHTML namespace (HTML inside the svg)");
+  const foreign = new Set<string>();
+  for (const m of text.matchAll(SVG_ELEMENT_NAME_RE)) {
+    const name = m[1] as string;
+    if (!SVG_ELEMENTS.has(name.slice(name.lastIndexOf(":") + 1).toLowerCase())) foreign.add(name);
+  }
+  if (foreign.size > 0) {
+    const names = [...foreign].slice(0, 5).map((n) => `\`<${n}>\``).join(", ");
+    out.add(`an element that is not an SVG element (${names}${foreign.size > 5 ? ", …" : ""})`);
+  }
+  // `srcset` fetches like `src`; no SVG element takes one.
+  if (/(?<![\w.:-])(?:[\w.-]+:)?srcset\s*=/i.test(decoded)) out.add("a `srcset` attribute (a fetch from outside the file)");
+  // An animation rewriting an `href`/`src`, refused wherever it is named, so no tag-scan state can hide it.
+  if (/(?<![\w.:-])attributeName\s*=\s*["']?\s*(?:[\w.-]+:)?(?:href|src)\b/i.test(decoded)) {
+    out.add("an animation that rewrites an `href` or `src`");
+  }
+  // Tag by tag (see SVG_TAG_RE), so a hostile 2 MB file stays linear. Twice: over the raw text, and with
+  // comments, CDATA and PIs blanked, where a quote in one would otherwise merge the tags after it.
+  for (const m of [...text.matchAll(SVG_TAG_RE), ...blankNonMarkup(text).matchAll(SVG_TAG_RE)]) {
+    const tag = m[0];
+    const animation = SVG_ANIMATION_RE.test(tag);
+    for (const a of tag.matchAll(SVG_ATTR_RE)) {
+      const name = (a[1] as string).toLowerCase();
+      const local = name.slice(name.lastIndexOf(":") + 1);
+      const value = decodeRefs(a[2] ?? a[3] ?? a[4] ?? "").trim();
+      if (/^on[a-z]+$/.test(local)) out.add("an event-handler attribute (`on…=`)");
+      if (local === "srcdoc") out.add("a `srcdoc` attribute (an HTML document inside the svg)");
+      // Presentation attributes (`fill`, `filter`, `mask`, `cursor`, …) are CSS too, so every value gets the style check.
+      const why = styleRefusal(value);
+      if (why) out.add(why);
+      if ((local === "href" || local === "src") && !value.startsWith("#")) {
+        out.add("an `href` or `src` that leaves the file (only `#fragment` links are admitted)");
+      }
+      if (animation && local === "attributename" && /^(?:[\w.-]+:)?(?:href|src)$/i.test(value)) {
+        out.add("an animation that rewrites an `href` or `src`");
+      }
+      if (animation && ["values", "to", "from", "by"].includes(local) && /[a-z][a-z0-9+.-]*:|\/\/|url\(/i.test(value)) {
+        out.add("an animation whose values hold a URL");
+      }
+    }
+    // `<svg/onload=…>`: in HTML, `/` separates attributes, and a quote may end one.
+    if (/[\s/"']on[a-z]+\s*=/i.test(tag)) out.add("an event-handler attribute (`on…=`)");
+  }
+  // A `<?xml-stylesheet href=…?>` and the like are not tags above; any `href`/`src` outside a `#fragment` is refused.
+  for (const m of text.matchAll(/(?<![\w.:-])(?:[\w.-]+:)?(?:href|src)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi)) {
+    if (!decodeRefs(m[1] ?? m[2] ?? m[3] ?? "").trim().startsWith("#")) {
+      out.add("an `href` or `src` that leaves the file (only `#fragment` links are admitted)");
+      break;
+    }
+  }
+  for (const css of styleContents(text)) {
+    const why = styleRefusal(decodeRefs(css));
+    if (why) out.add(why);
+  }
+  if (/url\(\s*(?:['"][\s\x00-\x1f]*)?(?!#)[^)'"\s\x00-\x1f]/i.test(decoded) || /@import\b/i.test(decoded) || /image-set\(/i.test(decoded)) {
+    out.add("a style that loads from outside the file (`url(…)`, `image-set(…)` or `@import`)");
+  }
+  return [...out];
+}
+
+/** Why a text evidence file's bytes are not plain UTF-8 (K1), or null: a scan of mis-decoded text sees nothing. */
+export function notUtf8(b: Buffer): string | null {
+  const is = (sig: number[]): boolean => sig.every((x, i) => b[i] === x);
+  if (is([0xff, 0xfe]) || is([0xfe, 0xff]) || is([0x00, 0x00, 0xfe, 0xff])) return "starts with a UTF-16 or UTF-32 byte-order mark";
+  if (b.includes(0)) return "holds a NUL byte";
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(b);
+  } catch {
+    return "is not valid UTF-8";
+  }
+  return null;
+}
 
 export const FINDINGS_SCHEMA_V1 = "alissa-findings/v1";
 /** v1.1 (§2.5, §4.6): the URL cite, `project | bodyOfWork` with `asker`, `reads` that may be empty. */
 export const FINDINGS_SCHEMA_V11 = "alissa-findings/v1.1";
+/** v1.2 (operator decision 2026-10-20): the evidence cite, `{ kind: evidence, file }`. */
+export const FINDINGS_SCHEMA_V12 = "alissa-findings/v1.2";
 
 /** Studio's cite check (lane DS-3), on the lint token. */
 export const VERIFY_ROUTE = "/v1/factory/repo-files/verify";
@@ -904,6 +1147,12 @@ interface UrlCite {
   archive?: string;
 }
 
+/** An evidence cite (v1.2): a file of the finding's own `evidence/` folder. */
+interface EvidenceCite {
+  kind: "evidence";
+  file: string;
+}
+
 let findingsValidator: ValidateFunction | null = null;
 
 export function findingsSchema(): ValidateFunction {
@@ -929,6 +1178,7 @@ const CITE_PATH_RE = /^\/(questions|risks)\/(\d+)\/cites\/(\d+)/;
 function kbSchemaErrors(errors: ErrorObject[], fm: unknown): Array<ErrorObject | string> {
   const doc = isRecord(fm) ? fm : {};
   const v1 = doc.schema === FINDINGS_SCHEMA_V1;
+  const v12 = doc.schema === FINDINGS_SCHEMA_V12;
   const out: Array<ErrorObject | string> = [];
   const said = new Set<string>();
   const say = (x: ErrorObject | string): void => {
@@ -952,13 +1202,20 @@ function kbSchemaErrors(errors: ErrorObject[], fm: unknown): Array<ErrorObject |
       const cites = isRecord(entry) ? entry.cites : undefined;
       const cite = Array.isArray(cites) ? cites[Number(m[3])] : undefined;
       const url = isRecord(cite) && cite.kind === "url";
+      const evidence = isRecord(cite) && cite.kind === "evidence";
       if (e.keyword === "oneOf" && e.schemaPath === "#/definitions/cite/oneOf") continue;
       if (url && v1) {
         say(`frontmatter ${e.instancePath.slice(0, m[0].length)} is a URL cite — it needs \`schema: ${FINDINGS_SCHEMA_V11}\` (§2.5)`);
         continue;
       }
-      const branch = e.schemaPath.startsWith("#/definitions/urlCite/") ? "url" : e.schemaPath.startsWith("#/definitions/repoCite") ? "repo" : null;
-      if (branch !== null && branch !== (url ? "url" : "repo")) continue;
+      if (evidence && !v12) {
+        say(`frontmatter ${e.instancePath.slice(0, m[0].length)} is an evidence cite — it needs \`schema: ${FINDINGS_SCHEMA_V12}\``);
+        continue;
+      }
+      const branch = e.schemaPath.startsWith("#/definitions/urlCite/") ? "url"
+        : e.schemaPath.startsWith("#/definitions/evidenceCite/") ? "evidence"
+        : e.schemaPath.startsWith("#/definitions/repoCite") ? "repo" : null;
+      if (branch !== null && branch !== (url ? "url" : evidence ? "evidence" : "repo")) continue;
     }
     say(e);
   }
@@ -1029,12 +1286,17 @@ export async function lintKb(src: KbSource, opts: KbLintOptions): Promise<KbLint
     return result(["K1", "K5"]);
   }
 
+  const evidence = [...src.sizes.keys()].filter((rel) => rel.startsWith(`${EVIDENCE_DIR}/`));
+  kbEvidenceShape(src, evidence, fail);
+
   const text = src.files.get(FINDINGS_FILE);
   const bytes = src.sizes.get(FINDINGS_FILE);
   if (bytes !== undefined && bytes > KB_LIMITS.fileBytes) fail("K4", `findings.md is ${bytes} bytes; the limit is ${KB_LIMITS.fileBytes} (§2.3)`, FINDINGS_FILE);
   if (text === undefined) {
-    notes.push("K2–K8 not run: no readable findings.md");
-    return result(["K1", "K4"]);
+    // K5 still scans the evidence it could read.
+    for (const rel of evidence) kbSecretScan(src.files.get(rel), rel, fail);
+    notes.push("K2–K9 not run on findings.md: none is readable");
+    return result(["K1", "K4", "K5"]);
   }
 
   // K2 — frontmatter (K4 owns the schema's count limits).
@@ -1067,7 +1329,7 @@ export async function lintKb(src: KbSource, opts: KbLintOptions): Promise<KbLint
   const questions = fm ? (fm.questions as Array<Record<string, unknown>>) : [];
   const risks = fm ? ((fm.risks as Array<Record<string, unknown>> | undefined) ?? []) : [];
   questionCount = questions.length;
-  const { repoCites, urlCites } = citesOf(questions, risks);
+  const { repoCites, urlCites, evidenceCites } = citesOf(questions, risks);
   if (fm) {
     if (src.task !== null && fm.task !== src.task) k2fail(`\`task\` is \`${clean(fm.task)}\` but the directory is \`${src.task}\``);
     const reads = fm.reads as Array<{ repo: string; sha: string }>;
@@ -1148,8 +1410,26 @@ export async function lintKb(src: KbSource, opts: KbLintOptions): Promise<KbLint
       }
     }
   }
-  const secretLines = secretShapedLines(text);
-  if (secretLines.length > 0) fail("K5", `secret-shaped text on line(s) ${secretLines.join(", ")} — the token shapes of repoContextFilter.ts (§10)`, FINDINGS_FILE);
+  kbSecretScan(text, FINDINGS_FILE, fail);
+  // …and every text evidence file, as findings.md is.
+  for (const rel of evidence) kbSecretScan(src.files.get(rel), rel, fail);
+
+  // K9 — evidence cited: every evidence file is cited at least once, and every cite names one.
+  const held = new Set(evidence.map((rel) => rel.slice(EVIDENCE_DIR.length + 1)));
+  // A name K1 refuses cannot be cited (the cite grammar is K1's name); K1 alone reports it.
+  const citable = [...held].filter((name) => KB_EVIDENCE_NAME_RE.test(name));
+  const cited = new Set<string>();
+  for (const m of text.matchAll(INLINE_EVIDENCE_RE)) cited.add((m[1] as string).replace(/\.+$/, ""));
+  for (const c of evidenceCites) cited.add(c.file);
+  for (const name of [...cited].sort()) {
+    if (!held.has(name)) fail("K9", `\`evidence:${clean(name)}\` is cited, but \`${EVIDENCE_DIR}/${clean(name)}\` is not in the folder — a dangling cite`, FINDINGS_FILE);
+  }
+  // An invalid frontmatter hides its evidence cites; the uncited check then waits for K2's fix.
+  if (fm || !rawEvidenceCite(text)) {
+    for (const name of citable.sort()) {
+      if (!cited.has(name)) fail("K9", `is never cited — findings.md names every evidence file it carries (\`evidence:${clean(name)}\` inline or a \`kind: evidence\` cite)`, `${EVIDENCE_DIR}/${name}`);
+    }
+  } else notes.push("K9's uncited-file check not run: the frontmatter is not valid (K2), so its evidence cites could not be read");
 
   // §3.6 — the review line: `light` for any URL cite or any `high`-impact question, else `none`.
   if (fm) {
@@ -1160,31 +1440,77 @@ export async function lintKb(src: KbSource, opts: KbLintOptions): Promise<KbLint
 
   if (!opts.online) {
     notes.push("K6–K8 not run (offline)");
-    return result(["K1", "K2", "K3", "K4", "K5"]);
+    return result(["K1", "K2", "K3", "K4", "K5", "K9"]);
   }
   if (!fm) {
     notes.push("K6–K8 not evaluated: the frontmatter is not valid (K2)");
-    return result(["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8"]);
+    return result(["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9"]);
   }
   await kbTask(fm, src, urlCites.length, opts.reader, fail);
   await kbCites(repoCites, fm.reads as Array<{ repo: string; sha: string }>, opts.verifier, fail, notes);
   if (urlCites.length > KB_LIMITS.urlCitesMax) notes.push(`K8 not run: ${urlCites.length} URL cites is past the route's ${KB_LIMITS.urlCitesMax} (K4)`);
   else await kbUrlCites(urlCites, opts.verifier, fail, notes);
-  return result(["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8"]);
+  return result(["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9"]);
+}
+
+/** K5's token-shape scan over one text file; an unreadable file (past the read cap) is K4's. */
+function kbSecretScan(text: string | undefined, file: string, fail: KbFail): void {
+  if (text === undefined) return;
+  const lines = secretShapedLines(text);
+  if (lines.length > 0) fail("K5", `secret-shaped text on line(s) ${lines.join(", ")} — the token shapes of repoContextFilter.ts (§10)`, file);
+}
+
+/** Does the raw frontmatter appear to carry a `kind: evidence` cite? */
+function rawEvidenceCite(text: string): boolean {
+  const split = splitFrontmatter(text);
+  return split.ok && /\bkind:\s*["']?evidence\b/.test(split.frontmatter);
+}
+
+/** K1's evidence types (by extension; an image by its bytes too; an svg inert) and K4's caps. */
+function kbEvidenceShape(src: KbSource, evidence: string[], fail: KbFail): void {
+  if (evidence.length > KB_LIMITS.evidenceFilesMax) fail("K4", `the finding carries ${evidence.length} evidence files; at most ${KB_LIMITS.evidenceFilesMax}`);
+  const total = evidence.reduce((n, rel) => n + (src.sizes.get(rel) ?? 0), 0);
+  if (total > KB_LIMITS.evidenceBytesMax) fail("K4", `the evidence is ${total} bytes in all; at most ${KB_LIMITS.evidenceBytesMax} (10 MB)`);
+  for (const rel of evidence) {
+    const name = rel.slice(EVIDENCE_DIR.length + 1);
+    const size = src.sizes.get(rel) ?? 0;
+    if (size > KB_LIMITS.evidenceFileBytes) fail("K4", `is ${size} bytes; an evidence file is at most ${KB_LIMITS.evidenceFileBytes} (2 MB)`, rel);
+    if (!KB_EVIDENCE_NAME_RE.test(name)) fail("K1", "is not named `[a-z0-9][a-z0-9._-]{0,63}` — an evidence file's name is lower case, at most 64 characters", clean(rel));
+    const ext = extensionOf(name);
+    if (ext === undefined || !(KB_EVIDENCE_TYPES as readonly string[]).includes(ext)) {
+      fail("K1", `is ${ext === undefined ? "a file with no type" : `a \`.${clean(ext)}\` file`} — evidence is ${KB_EVIDENCE_TYPES.join(", ")} only`, clean(rel));
+      continue;
+    }
+    const bytes = src.evidence.get(rel);
+    if (bytes === undefined) continue;
+    const not = imageMismatch(ext, bytes);
+    if (not) fail("K1", `is named \`.${ext}\`, but its bytes are not ${not}`, rel);
+    const enc = isKbTextEvidence(rel) ? notUtf8(bytes) : null;
+    if (enc) {
+      fail("K1", `${enc} — text evidence is UTF-8, so the svg and secret scans read what a viewer renders`, rel);
+      continue;
+    }
+    if (ext === "svg") {
+      const why = svgRefusals(src.files.get(rel) ?? "");
+      if (why.length > 0) fail("K1", `is an svg carrying ${why.join(", ")} — an svg is evidence only when it is inert`, rel);
+    }
+  }
 }
 
 /** Every cite of the questions and the risks, split by kind: a repo cite has no `kind`, or `kind: repo`. */
-function citesOf(questions: Array<Record<string, unknown>>, risks: Array<Record<string, unknown>>): { repoCites: Cite[]; urlCites: UrlCite[] } {
+function citesOf(questions: Array<Record<string, unknown>>, risks: Array<Record<string, unknown>>): { repoCites: Cite[]; urlCites: UrlCite[]; evidenceCites: EvidenceCite[] } {
   const repoCites: Cite[] = [];
   const urlCites: UrlCite[] = [];
+  const evidenceCites: EvidenceCite[] = [];
   for (const x of [...questions, ...risks]) {
     if (!Array.isArray(x.cites)) continue;
     for (const c of x.cites as Array<Record<string, unknown>>) {
       if (c.kind === "url") urlCites.push(c as unknown as UrlCite);
+      else if (c.kind === "evidence") evidenceCites.push(c as unknown as EvidenceCite);
       else repoCites.push(c as unknown as Cite);
     }
   }
-  return { repoCites, urlCites };
+  return { repoCites, urlCites, evidenceCites };
 }
 
 type KbFail = (rule: KRule, message: string, file?: string, couldNotRun?: boolean) => void;

@@ -225,6 +225,24 @@ export const KB_DIR_RE = /^knowledge-base\/([0-9]{4})\/([0-9]{2})\/([0-9]{2})\/T
 /** Milestone 0's assessment (§7.1): `knowledge-base/assessments/<project-slug>-<yyyy-mm-dd>.md`. */
 export const KB_ASSESSMENT_RE = /^knowledge-base\/assessments\/([a-z0-9][a-z0-9-]{0,63})-([0-9]{4})-([0-9]{2})-([0-9]{2})\.md$/;
 export const FINDINGS_FILE = "findings.md";
+/**
+ * A finding's optional `evidence/` folder (operator decision 2026-10-20, amending §4.2): flat,
+ * regular files only. The types K1 admits; the text ones are read for K5's scan (and the svg check).
+ */
+export const KB_EVIDENCE_TYPES = ["png", "jpg", "jpeg", "webp", "svg", "csv", "json", "mmd", "d2", "txt", "log"] as const;
+export const KB_TEXT_EVIDENCE_TYPES = ["svg", "csv", "json", "mmd", "d2", "txt", "log"] as const;
+/** The largest evidence file K4 admits (2 MB); a file up to it is read, past it only sized. */
+export const KB_EVIDENCE_READ_CAP = 2 * 1024 * 1024;
+
+/** The lower-cased extension of `rel`, or `undefined` when it has none. */
+export function extensionOf(rel: string): string | undefined {
+  return /\.([^./]+)$/.exec(rel)?.[1]?.toLowerCase();
+}
+
+export function isKbTextEvidence(rel: string): boolean {
+  const ext = extensionOf(rel);
+  return ext !== undefined && (KB_TEXT_EVIDENCE_TYPES as readonly string[]).includes(ext);
+}
 
 export interface KbSource {
   /** One discovery task's findings directory, or milestone 0's one assessment file. */
@@ -235,9 +253,12 @@ export interface KbSource {
   task: string | null;
   /** Findings: the directory's day, `YYYY-MM-DD`; `null` when the layout does not name one. */
   day: string | null;
-  /** Readable files: `findings.md`, or the assessment's file name. */
+  /** Readable text files: `findings.md` and text `evidence/<file>`, or the assessment's file name. */
   files: Map<string, string>;
+  /** Byte size of every regular file found (`findings.md`, `evidence/<file>`). */
   sizes: Map<string, number>;
+  /** The bytes of every `evidence/<file>` within the read cap, for K1's type check. */
+  evidence: Map<string, Buffer>;
   /** K1 findings made while reading the layout. */
   layout: string[];
   notes: string[];
@@ -250,7 +271,7 @@ function realDay(y: string, m: string, d: string): boolean {
 }
 
 function emptyKb(kind: KbSource["kind"], label: string): KbSource {
-  return { kind, label, task: null, day: null, files: new Map(), sizes: new Map(), layout: [], notes: [] };
+  return { kind, label, task: null, day: null, files: new Map(), sizes: new Map(), evidence: new Map(), layout: [], notes: [] };
 }
 
 /** K1 over a findings directory's repository path; fills `task` and `day` when they are well formed. */
@@ -278,7 +299,7 @@ function checkAssessmentName(path: string, src: KbSource): void {
 
 /**
  * K1 on a pull request: the diff touches exactly one new `knowledge-base/<YYYY>/<MM>/<DD>/TASK-<n>/`
- * directory holding `findings.md` and nothing else — or, for milestone 0's design task, exactly one
+ * directory holding `findings.md` and, optionally, a flat `evidence/` folder — or, for milestone 0's design task, exactly one
  * new `knowledge-base/assessments/*.md` file and nothing else (whether the PR's task is a design
  * task is K1's online half, in rules.ts). A mix with `plans/**` is refused here.
  */
@@ -335,16 +356,43 @@ function readKbChanges(repo: string, base: string, head: string, changes: Array<
   for (const rec of tree.split("\0").filter((r) => r !== "")) {
     const m = /^(\d{6}) (\w+) ([0-9a-f]+)\t(.*)$/s.exec(rec);
     if (!m) continue;
-    const [, mode, type, , path] = m as unknown as [string, string, string, string, string];
+    const [, mode, type, sha, path] = m as unknown as [string, string, string, string, string];
     const rel = path.slice(`${dir}/`.length);
     if (type !== "blob" || (mode !== "100644" && mode !== "100755")) {
       src.layout.push(`\`${rel}\` is ${mode === "120000" ? "a symbolic link" : type === "commit" ? "a submodule" : `mode ${mode}`} — a finding holds regular files only`);
-    } else if (rel !== FINDINGS_FILE) {
-      src.layout.push(`\`${rel}\` does not belong in a findings directory — it holds \`${FINDINGS_FILE}\` and nothing else`);
-    } else readBlob(repo, head, path, rel, src);
+    } else if (rel === FINDINGS_FILE) readBlob(repo, head, path, rel, src);
+    else if (!kbMember(rel, src)) continue;
+    else {
+      const size = Number(git(repo, ["cat-file", "-s", sha]).toString("utf8").trim());
+      keepEvidence(rel, size, () => git(repo, ["cat-file", "blob", sha]), src);
+    }
   }
   if (!src.sizes.has(FINDINGS_FILE)) src.layout.push(`\`${FINDINGS_FILE}\` is missing`);
   return src;
+}
+
+const KB_HOLDS = `it holds \`${FINDINGS_FILE}\` and, optionally, \`evidence/<file>\` (flat), nothing else`;
+
+/**
+ * Is `rel` (inside a findings directory, not `findings.md`) a place a finding may hold a file —
+ * `evidence/<file>`, one level deep? If not, K1's finding is recorded and the answer is no.
+ */
+function kbMember(rel: string, src: KbSource): boolean {
+  const segs = rel.split("/");
+  if (segs[0] === EVIDENCE_DIR && segs.length === 2 && segs[1] !== "") return true;
+  if (segs[0] === EVIDENCE_DIR && segs.length > 2) {
+    src.layout.push(`\`${rel.replace(/\/$/, "")}\` is a nested path — \`${EVIDENCE_DIR}/\` is flat: \`${EVIDENCE_DIR}/<file>\`, no subfolders`);
+  } else src.layout.push(`\`${rel}\` does not belong in a findings directory — ${KB_HOLDS}`);
+  return false;
+}
+
+/** Records an evidence file's size and, within the read cap, its bytes (and its text, for a text type). */
+function keepEvidence(rel: string, size: number, read: () => Buffer, src: KbSource): void {
+  src.sizes.set(rel, size);
+  if (size > KB_EVIDENCE_READ_CAP) return;
+  const bytes = read();
+  src.evidence.set(rel, bytes);
+  if (isKbTextEvidence(rel)) src.files.set(rel, bytes.toString("utf8"));
 }
 
 /** One regular blob at `head:path`, as `rel`; a symlink or a submodule is K1's finding. */
@@ -391,7 +439,17 @@ export function readKbDir(path: string, base?: string | null): KbSource {
     for (const name of readdirSync(abs).sort()) {
       const entry = lstatSync(join(abs, name));
       if (entry.isSymbolicLink()) src.layout.push(`\`${name}\` is a symbolic link — a finding holds regular files only`);
-      else if (name !== FINDINGS_FILE || !entry.isFile()) src.layout.push(`\`${name}\` does not belong in a findings directory — it holds \`${FINDINGS_FILE}\` and nothing else`);
+      else if (name === EVIDENCE_DIR && entry.isDirectory()) {
+        for (const ev of readdirSync(join(abs, name)).sort()) {
+          const rel = `${EVIDENCE_DIR}/${ev}`;
+          const f = join(abs, name, ev);
+          const e = lstatSync(f);
+          if (e.isSymbolicLink()) src.layout.push(`\`${rel}\` is a symbolic link — a finding holds regular files only`);
+          else if (e.isDirectory()) kbMember(`${rel}/`, src);
+          else if (!e.isFile()) src.layout.push(`\`${rel}\` is not a regular file — a finding holds regular files only`);
+          else keepEvidence(rel, e.size, () => readFileSync(f), src);
+        }
+      } else if (name !== FINDINGS_FILE || !entry.isFile()) src.layout.push(`\`${name}\` does not belong in a findings directory — ${KB_HOLDS}`);
       else {
         src.sizes.set(name, entry.size);
         if (entry.size <= READ_CAP_BYTES) src.files.set(name, readFileSync(join(abs, name), "utf8"));

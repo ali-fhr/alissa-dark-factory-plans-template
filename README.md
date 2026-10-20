@@ -277,7 +277,7 @@ with nothing else changed; `findings.v1.json`, the knowledge base's; and `integr
 an integration-check report's), `lint/` (the linter, its tests and the `VERSION` stamp), `fixtures/`
 (a golden plan that passes, at least one plan per rule failing exactly that rule — `rule-<nn>[b]-<what>`,
 one per schema v1.1 refusal and one for rule 5b — the Alissa and GitHub state the tests' fake APIs
-serve for rules 10–12 and 5b, the knowledge-base cases `kb-golden`, `kb-golden-web`, `kb-assessment`,
+serve for rules 10–12 and 5b, the knowledge-base cases `kb-golden`, `kb-golden-web`, `kb-evidence`, `kb-assessment`,
 one `kb-k<n>-<what>` per K rule and one `kb-k8-<verdict>` per K8 verdict, and under `fixtures/integration-check/` the run `ic-golden` and one
 `ic-i<n>-<what>` per I rule).
 
@@ -313,8 +313,8 @@ questions:
 A discovery task (design `alissa-build-discovery.md` §2–§4) answers its questions about one code
 repository, read at a pinned SHA, and writes exactly one new directory here:
 `knowledge-base/<YYYY>/<MM>/<DD>/TASK-<n>/findings.md`, the date being the task's creation day
-(UTC). Its frontmatter validates against `schema/findings.v1.json` (`schema: alissa-findings/v1`
-or `alissa-findings/v1.1`, `task`, `project`, `reads` — each repository at its 40-hex SHA —
+(UTC), with an optional `evidence/` folder beside it (below). Its frontmatter validates against
+`schema/findings.v1.json` (`schema: alissa-findings/v1`, `alissa-findings/v1.1` or `/v1.2`, `task`, `project`, `reads` — each repository at its 40-hex SHA —
 `topics`, `questions` with their `status`, `confidence`, `answer` or `reason`, `cites` and
 `unblocks`, then optional `risks` and `suggestedTasks`); its body is a `## Summary` and one section
 per question.
@@ -331,7 +331,35 @@ validates as written:
   task whose `Alissa-Sources:` is `web` or `both` (K6).
 - **The key**: exactly one of `project` and `bodyOfWork` (a `oneOf` — both, or neither, is
   refused), and `asker: TASK-<n>` on a project-less ask.
-- **`reads` may be empty** when every cite is a URL cite; a repo cite still names a read repository. The knowledge base is
+- **`reads` may be empty** when every cite is a URL cite; a repo cite still names a read repository.
+
+**Evidence — findings v1.2** (operator decision 2026-10-20, amending design §4.2): a finding may
+carry artifacts — screenshots, diagrams, small data — the way an integration-check run carries its
+`evidence/`:
+
+- **The folder.** Beside `findings.md`, an optional `evidence/<file>`: flat (no subfolders), regular
+  files only, each named `[a-z0-9][a-z0-9._-]{0,63}`, added once and never edited, like the finding.
+- **The types**, by extension — and an image by its first bytes too: `png`, `jpg`/`jpeg`, `webp`,
+  `svg`, `csv`, `json`, `mmd` (Mermaid), `d2`, `txt`, `log`. Anything else is refused by name. An
+  svg must be inert: SVG elements only (an allowlist, so an HTML tag such as `<img>`, `<meta>` or
+  `<table>` is refused), no `<script>` (namespace prefix or not), no DTD (`<!DOCTYPE`/`<!ENTITY`), no
+  `<foreignObject>` or XHTML namespace, no `on…=` event handler, no `href` or `src` other than a
+  `#fragment`, no `srcset`, no animation (`animate`, `set`, …) that rewrites an `href`/`src` or holds a URL, no
+  `srcdoc`, no style that loads from outside the file (`url(…)`, `image-set(…)`, `@import`, a quoted
+  function argument — in `style`, `<style>` or any presentation attribute), no backslash (CSS escape) in an attribute or style, and no character reference
+  other than a well-formed `&#…;` or the five XML names — every check reads the text with its
+  references decoded, as the parser does. Text evidence is UTF-8 (a UTF-8 BOM is fine; UTF-16,
+  NUL bytes and invalid sequences are refused), so the svg and secret scans read what a viewer renders.
+- **The caps**: at most 2 MB per file, 10 MB per folder and 20 files.
+- **The cites.** `findings.md` cites a file as `evidence:<file>` — inline, anywhere in the file
+  (*"the settings page today [evidence:settings-1440.png]"*), and/or in a question's or risk's
+  `cites` as `{ kind: evidence, file: <file> }`, which needs `schema: alissa-findings/v1.2`. Every
+  file is cited at least once and every cite names a file in the folder (K9). An evidence cite counts
+  as K3's cite, and goes to no Studio route.
+
+`fixtures/kb-evidence` is the golden finding with a cited png and csv.
+
+The knowledge base is
 **append-only**: a merged finding is never edited, and a newer one names it in `reverifies`. The
 index of findings is a Studio projection, never a committed file.
 
@@ -340,18 +368,19 @@ never *nothing to lint* — under the K rules, numbered apart from §5.5's:
 
 | Rule | Name | Refuses | Reads |
 |---|---|---|---|
-| K1 | layout and immutability | a diff outside **one** new `knowledge-base/<YYYY>/<MM>/<DD>/TASK-<n>/` directory (a mix with `plans/**` included); a directory already on the base branch; anything in it but `findings.md`; a date that is not a real calendar day; a change that is not an add. **The one exception:** exactly one new `knowledge-base/assessments/<project-slug>-<yyyy-mm-dd>.md` file and nothing else, from a `kind: design` task (milestone 0's assessment, §7.1) — the pull request's task is its `TASK-<n>-…` branch (`GITHUB_HEAD_REF`) or `--task` | git; Alissa for the assessment's task |
+| K1 | layout and immutability | a diff outside **one** new `knowledge-base/<YYYY>/<MM>/<DD>/TASK-<n>/` directory (a mix with `plans/**` included); a directory already on the base branch; anything in it but `findings.md` and a flat `evidence/` folder; a nested `evidence/` path, a symlink, an evidence file misnamed, of a type not admitted, an image whose bytes are not its type, text evidence that is not UTF-8, or an svg that is not inert; a date that is not a real calendar day; a change that is not an add. **The one exception:** exactly one new `knowledge-base/assessments/<project-slug>-<yyyy-mm-dd>.md` file and nothing else, from a `kind: design` task (milestone 0's assessment, §7.1) — the pull request's task is its `TASK-<n>-…` branch (`GITHUB_HEAD_REF`) or `--task` | git; Alissa for the assessment's task |
 | K2 | frontmatter | frontmatter that does not split, parse or validate against `schema/findings.v1.json`; a `task` that is not the directory's; a repeated question id or `reads` repository; a cite of a repository not in `reads` | — |
 | K3 | completeness | an `answered` or `partial` question with no `answer`; an `unanswerable` one with no `reason`; an `answered` one with no cite; a body with no `## Summary` | — |
-| K4 | size | `findings.md` over 32 KB; more than 12 questions, 12 risks, 8 suggested tasks or 24 cites per entry; a cite spanning more than 400 lines; a `## Summary` over 1,200 characters or a question's section over 6,000 | — |
-| K5 | hygiene | a cite of a deny-listed path, or secret-shaped text anywhere in the file (an assessment's too) — the deny-list and token shapes of Studio's `convex/core/repoContextFilter.ts` (NT-2's list as widened by BC1), inlined in `lint/rules.ts` with the commit and filter version they were copied at | — |
+| K4 | size | `findings.md` over 32 KB; more than 12 questions, 12 risks, 8 suggested tasks or 24 cites per entry; a cite spanning more than 400 lines; a `## Summary` over 1,200 characters or a question's section over 6,000; an evidence file over 2 MB, a folder over 10 MB or 20 files | — |
+| K5 | hygiene | a cite of a deny-listed path, or secret-shaped text anywhere in the file (an assessment's too) or in a text evidence file (`svg`, `csv`, `json`, `mmd`, `d2`, `txt`, `log`) — the deny-list and token shapes of Studio's `convex/core/repoContextFilter.ts` (NT-2's list as widened by BC1), inlined in `lint/rules.ts` with the commit and filter version they were copied at | — |
 | K6 | task | a `task` that does not resolve, is not `kind: discovery`, was created on another day (UTC) than its directory's, or whose `Alissa-Reads: <owner>/<repo>@<sha>` trailer pins another SHA than `reads` (or another repository); `Alissa-Reads: none` with a non-empty `reads`; a URL cite on a task with no `Alissa-Sources: web` or `both`; an `asker` that does not resolve, belongs to another owner, or differs from the task's `Alissa-Asker:` — `GET /v1/tasks/:id?view=full` with the lint token | Alissa |
 | K7 | cites resolve | a cited path that does not exist at its `reads` SHA, whose blob differs from `blob`, or whose line range runs past the file's end — asked of Studio, never of GitHub | Studio |
 | K8 | external cites hold | a URL cite whose page is `refuted` (it answers, and neither it nor the archive holds the quote), `gone` (404 or 410, and no archive holds it) or `blocked` (401, 403, 429, a paywall, or a URL Studio's fetch guard refuses, and no archive); `unavailable` (a 5xx or a timeout) is *plan-lint could not run*. `archived` — only the archive holds the quote — passes, and the projection marks the cite stale. Asked of Studio, never fetched from the runner | Studio |
+| K9 | evidence cited | an `evidence/` file that `findings.md` never cites; an `evidence:<file>` cite — inline or `{ kind: evidence, file }` — naming a file that is not in the folder | — |
 
 ```sh
-npm run plan-lint -- --kb knowledge-base/2026/10/14/TASK-1234             # K1–K8 (K6–K8 need ALISSA_API_TOKEN)
-npm run plan-lint -- --kb knowledge-base/2026/10/14/TASK-1234 --offline   # K1–K5 only, no network
+npm run plan-lint -- --kb knowledge-base/2026/10/14/TASK-1234             # K1–K9 (K6–K8 need ALISSA_API_TOKEN)
+npm run plan-lint -- --kb knowledge-base/2026/10/14/TASK-1234 --offline   # K1–K5 and K9 only, no network
 npm run plan-lint -- --kb knowledge-base/assessments/shop-2026-10-14.md --task TASK-2000
 ```
 
@@ -389,7 +418,8 @@ npm run plan-lint -- --kb knowledge-base/assessments/shop-2026-10-14.md --task T
 - **`lint/VERSION`** is the template's version stamp, `key: value` lines. Studio's advisory
   readiness check `plans-repo-kb-lint` reads it (design §12 Q2): a plans repository whose stamp
   lacks `modes: … knowledge-base` gets no discovery tasks planned for it, and one whose stamp lacks
-  `findings-schema: alissa-findings/v1.1` and `K8` in `kb-rules` gets no URL cites (lane DS-11).
+  `findings-schema: alissa-findings/v1.1` and `K8` in `kb-rules` gets no URL cites (lane DS-11); one
+  whose stamp lacks `alissa-findings/v1.2` and `K9` lints no `evidence/` folder.
   `lint/test/kb.test.ts` keeps the stamp in step with the schemas and the rules.
 - **Rollout.** The template changes new plans repositories only; the provisioner never overwrites
   an adopted one. Until an existing repository is upgraded — by an ordinary `TASK-` lane in that
