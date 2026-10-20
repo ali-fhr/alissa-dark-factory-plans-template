@@ -344,7 +344,10 @@ carry artifacts — screenshots, diagrams, small data — the way an integration
   svg must be inert: no `<script>` (namespace prefix or not), no DTD (`<!DOCTYPE`/`<!ENTITY`), no
   `<foreignObject>` or XHTML namespace, no `on…=` event handler, no `href` or `src` other than a
   `#fragment`, no animation (`animate`, `set`, …) that rewrites an `href`/`src` or holds a URL, no
-  style that loads from outside the file. Text evidence is UTF-8 (a UTF-8 BOM is fine; UTF-16,
+  `srcdoc`, no style that loads from outside the file (`url(…)`, `image-set(…)`, `@import`, a quoted
+  function argument), no backslash (CSS escape) in an attribute or style, and no character reference
+  other than a well-formed `&#…;` or the five XML names — every check reads the text with its
+  references decoded, as the parser does. Text evidence is UTF-8 (a UTF-8 BOM is fine; UTF-16,
   NUL bytes and invalid sequences are refused), so the svg and secret scans read what a viewer renders.
 - **The caps**: at most 2 MB per file, 10 MB per folder and 20 files.
 - **The cites.** `findings.md` cites a file as `evidence:<file>` — inline, anywhere in the file

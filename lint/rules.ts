@@ -739,13 +739,72 @@ const SVG_ATTR_RE = /(?<![\w.:-])((?:[\w.-]+:)?[\w.-]+)\s*=\s*(?:"([^"]*)"|'([^'
 /** SMIL elements that can set another attribute's value. */
 const SVG_ANIMATION_RE = /^<(?:[\w.-]+:)?(?:animate|set|animateMotion|animateTransform|animateColor)\b/i;
 
-/** An attribute value with its character references decoded, as the XML parser reads it. */
+/** The five references XML defines without a DTD (and a DTD is refused). */
+const XML_NAMED_REFS: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
+/** A character reference with a digit run of any length: XML allows any number of leading zeros. */
+const CHAR_REF_RE = /&(?:#(\d+)|#x([0-9a-f]+)|(amp|lt|gt|quot|apos));/gi;
+
+/** A reference's code point, or null when it is not an XML Char (NUL, a control, a surrogate, past U+10FFFF). */
+function refCodePoint(d: string | undefined, h: string | undefined): number | null {
+  const digits = (d ?? h ?? "").replace(/^0+(?=.)/, "");
+  if (digits.length > 7) return null;
+  const cp = Number.parseInt(digits, d !== undefined ? 10 : 16);
+  const xmlChar = cp === 0x9 || cp === 0xa || cp === 0xd || (cp >= 0x20 && cp <= 0xd7ff) || (cp >= 0xe000 && cp <= 0xfffd) || (cp >= 0x10000 && cp <= 0x10ffff);
+  return xmlChar ? cp : null;
+}
+
+/** Text with its character references decoded, as the XML parser reads it. An undecodable one becomes U+FFFD (and is refused, see badRef). */
 function decodeRefs(v: string): string {
-  return v.replace(/&(?:#(\d{1,7})|#x([0-9a-f]{1,6})|(amp|lt|gt|quot|apos));/gi, (_, d, h, n) => {
-    if (n) return ({ amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" } as Record<string, string>)[n.toLowerCase()] ?? "";
-    const cp = Number.parseInt(d ?? h, d ? 10 : 16);
-    return cp <= 0x10ffff ? String.fromCodePoint(cp) : "";
+  return v.replace(CHAR_REF_RE, (_, d, h, n) => {
+    if (n) return XML_NAMED_REFS[n.toLowerCase()] as string;
+    const cp = refCodePoint(d, h);
+    return cp === null ? "\ufffd" : String.fromCodePoint(cp);
   });
+}
+
+/**
+ * Whether the text holds a reference that is not a well-formed XML one with a valid code point: an
+ * `&#` not closed by `;`, a `;`-closed named reference other than the five (`&colon;`, which HTML decodes), or
+ * one decoding to no XML Char. Failing closed keeps every check on the same text a viewer reads.
+ */
+function badRef(text: string): boolean {
+  // A name with no `;` (`R&D`) is left alone: no parser turns one into a letter or a `:`.
+  for (const m of text.matchAll(/&(#x?[0-9a-z]*;?|[a-z][a-z0-9]*;)/gi)) {
+    const ref = m[1] as string;
+    const num = /^#(?:(\d+)|x([0-9a-f]+));$/i.exec(ref);
+    if (num) {
+      if (refCodePoint(num[1], num[2]) === null) return true;
+    } else if (ref.startsWith("#") || !/^(?:amp|lt|gt|quot|apos);$/i.test(ref)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Each `<style>` element's content (to its close tag, or the end of the text), scanned linearly. */
+function styleContents(text: string): string[] {
+  const out: string[] = [];
+  let open = -1;
+  for (const m of text.matchAll(/<(\/?)(?:[\w.-]+:)?style\b[^<>]*>/gi)) {
+    const end = (m.index as number) + m[0].length;
+    if (m[1] === "" && open < 0) open = end;
+    else if (m[1] === "/" && open >= 0) {
+      out.push(text.slice(open, m.index));
+      open = -1;
+    }
+  }
+  if (open >= 0) out.push(text.slice(open));
+  return out;
+}
+
+/** A CSS escape (`\75rl(`, `@\69mport`) hides a keyword from every check here; presentation attributes are CSS too. */
+const CSS_ESCAPE = "a backslash (CSS escape) in an attribute or a style";
+
+/** Why a (decoded) style is not plain, or null: a CSS escape, or a quoted function argument that may fetch (`image(`, `src(`, …). */
+function styleRefusal(css: string): string | null {
+  if (css.includes("\\")) return CSS_ESCAPE;
+  if (/[\w-]\(\s*["'](?!\s*#)/.test(css)) return "a style function with a quoted argument other than a `#fragment`";
+  return null;
 }
 
 /**
@@ -756,9 +815,12 @@ export function svgRefusals(text: string): string[] {
   const out = new Set<string>();
   // A DTD can declare entities that expand into elements; evidence never needs one.
   if (/<!(?:DOCTYPE|ENTITY)\b/i.test(text)) out.add("a DTD (`<!DOCTYPE` or `<!ENTITY`)");
+  if (badRef(text)) out.add("a character reference that is not a well-formed XML one (`&#…;`, `&amp;`, `&lt;`, `&gt;`, `&quot;`, `&apos;`)");
+  // The parser decodes references everywhere, so the whole-text checks read the decoded text.
+  const decoded = decodeRefs(text);
   if (svgElement("script").test(text)) out.add("a `<script>` element");
   if (svgElement("foreignObject").test(text)) out.add("a `<foreignObject>` element");
-  if (/http:\/\/www\.w3\.org\/1999\/xhtml/i.test(text)) out.add("the XHTML namespace (HTML inside the svg)");
+  if (/http:\/\/www\.w3\.org\/1999\/xhtml/i.test(decoded)) out.add("the XHTML namespace (HTML inside the svg)");
   // Tag by tag (see SVG_TAG_RE), so a hostile 2 MB file stays linear.
   for (const m of text.matchAll(SVG_TAG_RE)) {
     const tag = m[0];
@@ -768,6 +830,12 @@ export function svgRefusals(text: string): string[] {
       const local = name.slice(name.lastIndexOf(":") + 1);
       const value = decodeRefs(a[2] ?? a[3] ?? a[4] ?? "").trim();
       if (/^on[a-z]+$/.test(local)) out.add("an event-handler attribute (`on…=`)");
+      if (local === "srcdoc") out.add("a `srcdoc` attribute (an HTML document inside the svg)");
+      if (value.includes("\\")) out.add(CSS_ESCAPE);
+      if (local === "style") {
+        const why = styleRefusal(value);
+        if (why) out.add(why);
+      }
       if ((local === "href" || local === "src") && !value.startsWith("#")) {
         out.add("an `href` or `src` that leaves the file (only `#fragment` links are admitted)");
       }
@@ -788,7 +856,13 @@ export function svgRefusals(text: string): string[] {
       break;
     }
   }
-  if (/url\(\s*['"]?(?!#)[^)'"\s]/i.test(text) || /@import\b/i.test(text)) out.add("a style that loads from outside the file (`url(…)` or `@import`)");
+  for (const css of styleContents(text)) {
+    const why = styleRefusal(decodeRefs(css));
+    if (why) out.add(why);
+  }
+  if (/url\(\s*['"]?(?!#)[^)'"\s]/i.test(decoded) || /@import\b/i.test(decoded) || /image-set\(/i.test(decoded)) {
+    out.add("a style that loads from outside the file (`url(…)`, `image-set(…)` or `@import`)");
+  }
   return [...out];
 }
 

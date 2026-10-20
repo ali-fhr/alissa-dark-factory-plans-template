@@ -828,6 +828,43 @@ describe("evidence/ — K1 types, K4 caps, K5 scan, K9 cites (EV-1)", () => {
     for (const [text, why] of rows) assert.ok(svgRefusals(text).includes(why), `${text} → ${JSON.stringify(svgRefusals(text))}`);
   });
 
+  // PR #8 round 2: overlong and undecodable references, and the whole-text checks over decoded text.
+  it("c2: K1 decodes every character reference before the svg checks, and refuses one it cannot decode", async () => {
+    only(await offline(variant((d) => {
+      writeFileSync(join(d, "evidence", "flow.svg"), `<svg xmlns="http://www.w3.org/2000/svg"><a><animate attributeName="&#0000000104;ref" values="&#0000000106;avascript&#0000000058;alert(1)"/><text>x</text></a></svg>\n`);
+      appendBody(d, "The flow [evidence:flow.svg].");
+    })), "K1", "evidence/flow.svg", /an animation that rewrites an `href` or `src`/);
+    const ref = "a character reference that is not a well-formed XML one (`&#…;`, `&amp;`, `&lt;`, `&gt;`, `&quot;`, `&apos;`)";
+    const esc = "a backslash (CSS escape) in an attribute or a style";
+    const loads = "a style that loads from outside the file (`url(…)`, `image-set(…)` or `@import`)";
+    const rows: Array<[string, string]> = [
+      [`<svg><a><animate attributeName="&#0000000104;ref" values="&#0000000106;avascript&#0000000058;alert(1)"/><text>x</text></a></svg>`, "an animation whose values hold a URL"],
+      [`<svg><a><set attributeName="&#x0000068;ref" to="&#x000006a;avascript&#x000003a;x"/><text>x</text></a></svg>`, "an animation that rewrites an `href` or `src`"],
+      [`<svg><a><set attributeName="&#x0000068;ref" to="&#x000006a;avascript&#x000003a;x"/><text>x</text></a></svg>`, "an animation whose values hold a URL"],
+      [`<svg><a><set attributeName="&#x110000;ref" to="#x"/></a></svg>`, ref],
+      [`<svg><a><set attributeName="&#00000000000000000000104;ref" to="#x"/></a></svg>`, "an animation that rewrites an `href` or `src`"],
+      [`<svg><a><set attributeName="href" to="&#106avascript:x"/></a></svg>`, ref],
+      [`<svg><a><set attributeName="href" to="javascript&colon;x"/></a></svg>`, ref],
+      [`<svg><text>&#0;</text></svg>`, ref],
+      [`<svg><g xmlns:h="http&#x3a;//www.w3.org/1999/xhtml"><h:iframe srcdoc="&lt;script&gt;alert(1)&lt;/script&gt;"/></g></svg>`, "the XHTML namespace (HTML inside the svg)"],
+      [`<svg><g xmlns:h="http&#x3a;//www.w3.org/1999/xhtml"><h:iframe srcdoc="&lt;script&gt;alert(1)&lt;/script&gt;"/></g></svg>`, "a `srcdoc` attribute (an HTML document inside the svg)"],
+      [`<svg><rect style="fill:u&#114;l(https://evil.example/p.svg#a)"/></svg>`, loads],
+      [`<svg><style>rect { fill: u&#114;l(https://evil.example/p.svg#a) }</style></svg>`, loads],
+      [`<svg><style>&#64;import "https://evil.example/x.css";</style></svg>`, loads],
+      [`<svg><rect style="fill:\\75rl(https://evil.example/p.svg#a)"/></svg>`, esc],
+      [`<svg><style>rect { fill: \\75rl(https://evil.example/p.svg#a) }</style></svg>`, esc],
+      [`<svg><style>@\\69mport "https://evil.example/x.css";</style></svg>`, esc],
+      [`<svg><style>rect { fill: &#92;75rl(https://evil.example/p.svg#a) }</style></svg>`, esc],
+      [`<svg><rect fill="\\75rl(https://evil.example/p.svg#a)"/></svg>`, esc],
+      [`<svg><rect style="background:image-set(&quot;https://evil.example/p.png&quot; 1x)"/></svg>`, loads],
+      [`<svg><style>rect { background: -webkit-image-set("https://evil.example/p.png" 1x) }</style></svg>`, loads],
+      [`<svg><style>rect { background: image("https://evil.example/p.png") }</style></svg>`, "a style function with a quoted argument other than a `#fragment`"],
+    ];
+    for (const [text, why] of rows) assert.ok(svgRefusals(text).includes(why), `${text} → ${JSON.stringify(svgRefusals(text))}`);
+    // Ordinary charts still pass: the five XML references, numeric ones, a bare `&`, a style with url(#id).
+    assert.deepEqual(svgRefusals(`<svg xmlns="http://www.w3.org/2000/svg"><style>.a { fill: url("#g"); font-family: "Inter", sans-serif }</style><text>p &lt; 0.05 &amp; n &#8805; 30 &#x2014; R&D</text><rect class="a" style="opacity:0.5"/></svg>`), []);
+  });
+
   it("c2: K1 refuses text evidence that is not UTF-8, so neither scan is blinded", async () => {
     const utf16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>`, "utf16le")]);
     only(await offline(variant((d) => {
