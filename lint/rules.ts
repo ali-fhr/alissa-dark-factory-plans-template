@@ -808,6 +808,31 @@ function styleRefusal(css: string): string | null {
 }
 
 /**
+ * The text with each comment, CDATA section and processing instruction blanked to spaces (same length), so a
+ * quote inside one cannot merge the tags after it into one span. Linear: one `indexOf` per carrier; an
+ * unterminated one is blanked to the end.
+ */
+function blankNonMarkup(text: string): string {
+  const carriers: [string, string][] = [["<!--", "-->"], ["<![CDATA[", "]]>"], ["<?", "?>"]];
+  const parts: string[] = [];
+  let kept = 0;
+  for (let lt = text.indexOf("<"); lt >= 0; ) {
+    const c = carriers.find(([open]) => text.startsWith(open, lt));
+    if (!c) {
+      lt = text.indexOf("<", lt + 1);
+      continue;
+    }
+    const close = text.indexOf(c[1], lt + c[0].length);
+    const end = close < 0 ? text.length : close + c[1].length;
+    parts.push(text.slice(kept, lt), " ".repeat(end - lt));
+    kept = end;
+    lt = text.indexOf("<", end);
+  }
+  parts.push(text.slice(kept));
+  return parts.join("");
+}
+
+/**
  * What makes an svg active or a fetch (K1): a DTD, a script, an HTML island, an event handler, an
  * `href`/`src` off the page, an animation that rewrites one, a style that loads. Never the text itself.
  */
@@ -821,8 +846,13 @@ export function svgRefusals(text: string): string[] {
   if (svgElement("script").test(text)) out.add("a `<script>` element");
   if (svgElement("foreignObject").test(text)) out.add("a `<foreignObject>` element");
   if (/http:\/\/www\.w3\.org\/1999\/xhtml/i.test(decoded)) out.add("the XHTML namespace (HTML inside the svg)");
-  // Tag by tag (see SVG_TAG_RE), so a hostile 2 MB file stays linear.
-  for (const m of text.matchAll(SVG_TAG_RE)) {
+  // An animation rewriting an `href`/`src`, refused wherever it is named, so no tag-scan state can hide it.
+  if (/(?<![\w.:-])attributeName\s*=\s*["']?\s*(?:[\w.-]+:)?(?:href|src)\b/i.test(decoded)) {
+    out.add("an animation that rewrites an `href` or `src`");
+  }
+  // Tag by tag (see SVG_TAG_RE), so a hostile 2 MB file stays linear. Twice: over the raw text, and with
+  // comments, CDATA and PIs blanked, where a quote in one would otherwise merge the tags after it.
+  for (const m of [...text.matchAll(SVG_TAG_RE), ...blankNonMarkup(text).matchAll(SVG_TAG_RE)]) {
     const tag = m[0];
     const animation = SVG_ANIMATION_RE.test(tag);
     for (const a of tag.matchAll(SVG_ATTR_RE)) {

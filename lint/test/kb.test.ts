@@ -891,6 +891,33 @@ describe("evidence/ — K1 types, K4 caps, K5 scan, K9 cites (EV-1)", () => {
     assert.deepEqual(svgRefusals(`<svg xmlns="http://www.w3.org/2000/svg"><rect fill="url(' #g')" filter="url(#f)" mask="url( &quot;#m&quot; )"/></svg>`), []);
   });
 
+  // PR #8 round 4: a quote inside a comment, CDATA section or PI merged the tags after it into one span, hiding an animation.
+  it("c3: K1 refuses an href animation behind a quote in a comment, CDATA section or processing instruction", async () => {
+    only(await offline(variant((d) => {
+      writeFileSync(join(d, "evidence", "flow.svg"), `<svg xmlns="http://www.w3.org/2000/svg"><!-- Q1's numbers --><a><animate attributeName="href" values="https://evil.example/"/><text>x</text></a><!-- Q2's numbers --></svg>\n`);
+      appendBody(d, "The flow [evidence:flow.svg].");
+    })), "K1", "evidence/flow.svg", /an animation that rewrites an `href` or `src`/);
+    const rewrites = "an animation that rewrites an `href` or `src`";
+    const url = "an animation whose values hold a URL";
+    const w = (s: string): string => `<svg xmlns="http://www.w3.org/2000/svg">${s}</svg>`;
+    const inputs = [
+      `<!-- ' --><a><set attributeName="href" to="javascript:alert(1)"/><text>x</text></a><!-- ' -->`,
+      `<!-- Q1's numbers --><a><animate attributeName="href" values="https://evil.example/"/><text>x</text></a><!-- Q2's numbers -->`,
+      `<![CDATA[ " ]]><a><set attributeName="xlink:href" to="javascript:alert(1)"/></a><![CDATA[ " ]]>`,
+      `<?note ' ?><a><set attributeName="href" to="javascript:alert(1)"/></a><?note ' ?>`,
+    ];
+    for (const text of inputs) {
+      const got = svgRefusals(w(text));
+      assert.ok(got.includes(rewrites) && got.includes(url), `${text} → ${JSON.stringify(got)}`);
+    }
+    // Each half alone: the whole-text attributeName check (on no animation tag at all) and the blanked tag scan.
+    assert.deepEqual(svgRefusals(w(`<rect attributeName = ' &#104;ref'/>`)), [rewrites]);
+    assert.deepEqual(svgRefusals(w(`<!-- ' --><set attributeName="fill" to="javascript:alert(1)"/><!-- ' -->`)), [url]);
+    // An unterminated carrier is blanked to the end; ordinary chart text with an apostrophe in a comment passes.
+    assert.ok(svgRefusals(w(`<set attributeName="fill" to="javascript:x"/><!-- ' `)).includes(url));
+    assert.deepEqual(svgRefusals(w(`<!-- Q1's numbers --><rect><animate attributeName="opacity" values="0;1" dur="1s"/></rect><![CDATA[ it's ]]><?note ' ?>`)), []);
+  });
+
   it("c2: K1 refuses text evidence that is not UTF-8, so neither scan is blinded", async () => {
     const utf16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>`, "utf16le")]);
     only(await offline(variant((d) => {
