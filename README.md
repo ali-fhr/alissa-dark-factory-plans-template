@@ -344,7 +344,7 @@ carry artifacts — screenshots, diagrams, small data — the way an integration
   svg must be inert: SVG elements only (an allowlist, so an HTML tag such as `<img>`, `<meta>` or
   `<table>` is refused), no `<script>` (namespace prefix or not), no DTD (`<!DOCTYPE`/`<!ENTITY`), no
   `<foreignObject>` or XHTML namespace, no `on…=` event handler, no `href` or `src` other than a
-  `#fragment`, no `srcset`, no animation (`animate`, `set`, …) that rewrites an `href`/`src` or holds a URL, no
+  `#fragment`, no `srcset` or `ping`, no animation (`animate`, `set`, …) that rewrites an `href`/`src` or holds a URL, no
   `srcdoc`, no style that loads from outside the file (`url(…)`, `image-set(…)`, `@import`, a quoted
   function argument — in `style`, `<style>` or any presentation attribute), no backslash (CSS escape) in an attribute or style, and no character reference
   other than a well-formed `&#…;` or the five XML names — every check reads the text with its

@@ -854,7 +854,7 @@ function blankNonMarkup(text: string): string {
 
 /**
  * What makes an svg active or a fetch (K1): a DTD, a script, an HTML island, an event handler, an
- * `href`/`src` off the page, an animation that rewrites one, a style that loads. Never the text itself.
+ * `href`/`src` off the page, a `srcset` or `ping`, an animation that rewrites one, a style that loads. Never the text itself.
  */
 export function svgRefusals(text: string): string[] {
   const out = new Set<string>();
@@ -892,6 +892,8 @@ export function svgRefusals(text: string): string[] {
       const value = decodeRefs(a[2] ?? a[3] ?? a[4] ?? "").trim();
       if (/^on[a-z]+$/.test(local)) out.add("an event-handler attribute (`on…=`)");
       if (local === "srcdoc") out.add("a `srcdoc` attribute (an HTML document inside the svg)");
+      // SVG 2's `a` takes `ping`: a click POSTs to every URL in it, a fetch from outside the file like `srcset`.
+      if (local === "ping") out.add("a `ping` attribute (a fetch from outside the file)");
       // Presentation attributes (`fill`, `filter`, `mask`, `cursor`, …) are CSS too, so every value gets the style check.
       const why = styleRefusal(value);
       if (why) out.add(why);
