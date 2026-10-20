@@ -877,9 +877,9 @@ export function svgRefusals(text: string): string[] {
   }
   // `srcset` fetches like `src`; no SVG element takes one.
   if (/(?<![\w.:-])(?:[\w.-]+:)?srcset\s*=/i.test(decoded)) out.add("a `srcset` attribute (a fetch from outside the file)");
-  // An animation rewriting an `href`/`src`, refused wherever it is named, so no tag-scan state can hide it.
-  if (/(?<![\w.:-])attributeName\s*=\s*["']?\s*(?:[\w.-]+:)?(?:href|src)\b/i.test(decoded)) {
-    out.add("an animation that rewrites an `href` or `src`");
+  // An animation rewriting an `href`/`src`/`ping` (a relative `ping` passes the URL check, yet still POSTs to the serving host), refused wherever it is named, so no tag-scan state can hide it.
+  if (/(?<![\w.:-])attributeName\s*=\s*["']?\s*(?:[\w.-]+:)?(?:href|src|ping)\b/i.test(decoded)) {
+    out.add("an animation that rewrites an `href`, `src` or `ping`");
   }
   // Tag by tag (see SVG_TAG_RE), so a hostile 2 MB file stays linear. Twice: over the raw text, and with
   // comments, CDATA and PIs blanked, where a quote in one would otherwise merge the tags after it.
@@ -900,8 +900,8 @@ export function svgRefusals(text: string): string[] {
       if ((local === "href" || local === "src") && !value.startsWith("#")) {
         out.add("an `href` or `src` that leaves the file (only `#fragment` links are admitted)");
       }
-      if (animation && local === "attributename" && /^(?:[\w.-]+:)?(?:href|src)$/i.test(value)) {
-        out.add("an animation that rewrites an `href` or `src`");
+      if (animation && local === "attributename" && /^(?:[\w.-]+:)?(?:href|src|ping)$/i.test(value)) {
+        out.add("an animation that rewrites an `href`, `src` or `ping`");
       }
       if (animation && ["values", "to", "from", "by"].includes(local) && /[a-z][a-z0-9+.-]*:|\/\/|url\(/i.test(value)) {
         out.add("an animation whose values hold a URL");
