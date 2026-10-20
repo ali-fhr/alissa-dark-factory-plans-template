@@ -817,9 +817,9 @@ describe("evidence/ — K1 types, K4 caps, K5 scan, K9 cites (EV-1)", () => {
       [`<!DOCTYPE svg [<!ENTITY s "&#60;script>alert(1)&#60;/script>">]><svg xmlns="http://www.w3.org/2000/svg">&s;</svg>`, "a DTD (`<!DOCTYPE` or `<!ENTITY`)"],
       [`<svg/onload=alert(1)>`, "an event-handler attribute (`on…=`)"],
       [`<svg><rect title="a>b" onclick="x()"/></svg>`, "an event-handler attribute (`on…=`)"],
-      [`<svg><a><animate attributeName="href" values="javascript:alert(1)"/><text>x</text></a></svg>`, "an animation that rewrites an `href` or `src`"],
-      [`<svg><a><set attributeName="xlink:href" to="https://evil.example/"/><text>x</text></a></svg>`, "an animation that rewrites an `href` or `src`"],
-      [`<svg><a><set attributeName="&#104;ref" to="#x"/><text>x</text></a></svg>`, "an animation that rewrites an `href` or `src`"],
+      [`<svg><a><animate attributeName="href" values="javascript:alert(1)"/><text>x</text></a></svg>`, "an animation that rewrites an `href`, `src` or `ping`"],
+      [`<svg><a><set attributeName="xlink:href" to="https://evil.example/"/><text>x</text></a></svg>`, "an animation that rewrites an `href`, `src` or `ping`"],
+      [`<svg><a><set attributeName="&#104;ref" to="#x"/><text>x</text></a></svg>`, "an animation that rewrites an `href`, `src` or `ping`"],
       [`<svg><rect><animate attributeName="fill" values="url(https://evil.example/p)"/></rect></svg>`, "an animation whose values hold a URL"],
       [`<svg><foreignObject><img xmlns="http://www.w3.org/1999/xhtml" src="https://evil.example/t.png"/></foreignObject></svg>`, "a `<foreignObject>` element"],
       [`<svg><h:img xmlns:h="http://www.w3.org/1999/xhtml"/></svg>`, "the XHTML namespace (HTML inside the svg)"],
@@ -833,16 +833,16 @@ describe("evidence/ — K1 types, K4 caps, K5 scan, K9 cites (EV-1)", () => {
     only(await offline(variant((d) => {
       writeFileSync(join(d, "evidence", "flow.svg"), `<svg xmlns="http://www.w3.org/2000/svg"><a><animate attributeName="&#0000000104;ref" values="&#0000000106;avascript&#0000000058;alert(1)"/><text>x</text></a></svg>\n`);
       appendBody(d, "The flow [evidence:flow.svg].");
-    })), "K1", "evidence/flow.svg", /an animation that rewrites an `href` or `src`/);
+    })), "K1", "evidence/flow.svg", /an animation that rewrites an `href`, `src` or `ping`/);
     const ref = "a character reference that is not a well-formed XML one (`&#…;`, `&amp;`, `&lt;`, `&gt;`, `&quot;`, `&apos;`)";
     const esc = "a backslash (CSS escape) in an attribute or a style";
     const loads = "a style that loads from outside the file (`url(…)`, `image-set(…)` or `@import`)";
     const rows: Array<[string, string]> = [
       [`<svg><a><animate attributeName="&#0000000104;ref" values="&#0000000106;avascript&#0000000058;alert(1)"/><text>x</text></a></svg>`, "an animation whose values hold a URL"],
-      [`<svg><a><set attributeName="&#x0000068;ref" to="&#x000006a;avascript&#x000003a;x"/><text>x</text></a></svg>`, "an animation that rewrites an `href` or `src`"],
+      [`<svg><a><set attributeName="&#x0000068;ref" to="&#x000006a;avascript&#x000003a;x"/><text>x</text></a></svg>`, "an animation that rewrites an `href`, `src` or `ping`"],
       [`<svg><a><set attributeName="&#x0000068;ref" to="&#x000006a;avascript&#x000003a;x"/><text>x</text></a></svg>`, "an animation whose values hold a URL"],
       [`<svg><a><set attributeName="&#x110000;ref" to="#x"/></a></svg>`, ref],
-      [`<svg><a><set attributeName="&#00000000000000000000104;ref" to="#x"/></a></svg>`, "an animation that rewrites an `href` or `src`"],
+      [`<svg><a><set attributeName="&#00000000000000000000104;ref" to="#x"/></a></svg>`, "an animation that rewrites an `href`, `src` or `ping`"],
       [`<svg><a><set attributeName="href" to="&#106avascript:x"/></a></svg>`, ref],
       [`<svg><a><set attributeName="href" to="javascript&colon;x"/></a></svg>`, ref],
       [`<svg><text>&#0;</text></svg>`, ref],
@@ -896,8 +896,8 @@ describe("evidence/ — K1 types, K4 caps, K5 scan, K9 cites (EV-1)", () => {
     only(await offline(variant((d) => {
       writeFileSync(join(d, "evidence", "flow.svg"), `<svg xmlns="http://www.w3.org/2000/svg"><!-- Q1's numbers --><a><animate attributeName="href" values="https://evil.example/"/><text>x</text></a><!-- Q2's numbers --></svg>\n`);
       appendBody(d, "The flow [evidence:flow.svg].");
-    })), "K1", "evidence/flow.svg", /an animation that rewrites an `href` or `src`/);
-    const rewrites = "an animation that rewrites an `href` or `src`";
+    })), "K1", "evidence/flow.svg", /an animation that rewrites an `href`, `src` or `ping`/);
+    const rewrites = "an animation that rewrites an `href`, `src` or `ping`";
     const url = "an animation whose values hold a URL";
     const w = (s: string): string => `<svg xmlns="http://www.w3.org/2000/svg">${s}</svg>`;
     const inputs = [
@@ -943,6 +943,14 @@ describe("evidence/ — K1 types, K4 caps, K5 scan, K9 cites (EV-1)", () => {
     assert.deepEqual(svgRefusals(w(`<a href="#g" PING="#g" x:ping="#g"><text>x</text></a>`)), [ping]);
     assert.deepEqual(svgRefusals(w(`<!-- ' --><a href="#g" ping="https://evil.example/b"><text>x</text></a><!-- ' -->`)), [ping]);
     assert.deepEqual(svgRefusals(w(`<text>ping = 20 ms</text><rect data-ping="1"/>`)), []);
+    // An animation that sets `ping` is refused whatever its value: a relative one passes the URL check yet still POSTs to the serving host.
+    const pingAnim = "an animation that rewrites an `href`, `src` or `ping`";
+    assert.deepEqual(svgRefusals(w(`<a href="#g"><set attributeName="ping" to="beacon"/><text>x</text></a>`)), [pingAnim]);
+    assert.deepEqual(svgRefusals(w(`<a href="#g"><animate attributeName="x:PING" values="a;b" dur="1s"/></a>`)), [pingAnim]);
+    assert.deepEqual(svgRefusals(w(`<!-- ' --><a href="#g"><set attributeName="&#112;ing" to="beacon"/></a><!-- ' -->`)), [pingAnim]);
+    assert.deepEqual(svgRefusals(w(`<rect attributeName = ' ping'/>`)), [pingAnim]);
+    // A name that only starts with `ping` is not `ping`.
+    assert.deepEqual(svgRefusals(w(`<rect><set attributeName="pings" to="1"/></rect>`)), []);
     assert.deepEqual(svgRefusals(w(`<b/><i/><u/><s/><p/><div/>`)), [`an element that is not an SVG element (\`<b>\`, \`<i>\`, \`<u>\`, \`<s>\`, \`<p>\`, …)`]);
     // An ordinary chart: mixed-case SVG names, gradients, a filter, markers, text paths, animations.
     assert.deepEqual(svgRefusals(w(`<defs><linearGradient id="g"><stop offset="0"/></linearGradient><clipPath id="c"><rect/></clipPath><filter id="f"><feGaussianBlur stdDeviation="2"/><feMerge><feMergeNode/></feMerge></filter><marker id="m"><path d="M0 0"/></marker></defs><g clip-path="url(#c)"><polyline points="0,0 1,1"/><text><tspan>p &lt; 0.05</tspan><textPath href="#p">x</textPath></text><circle><animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="2s"/></circle><use href="#m"/></g><title>t</title><desc>d</desc>`)), []);
