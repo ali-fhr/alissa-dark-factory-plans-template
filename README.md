@@ -255,7 +255,8 @@ kind: code            # optional, code | design (default code)
   `https://api.alissa.app`.
 - **Transient reads are retried, then reported as "could not run".** Every Alissa (and GitHub)
   read that meets a network error, a timeout, a `429` or a `5xx` is retried — four attempts in
-  all, waiting 1 s, 2 s, then 4 s, or what the answer's `Retry-After` asks, and never more than
+  all, waiting 1 s, 2 s, then 4 s, or what the answer's `Retry-After` asks (a `429` without one:
+  until its `RateLimit` header's `reset=`, so a retry leaves the 60 s window), and never more than
   60 s of waiting for one read. A rule whose read stays unavailable through every retry **could
   not run**: the run prints `plan-lint could not run: rule <n> (<name>): …`, the check's title is
   `plan-lint could not run — rule <n> (<name>) — <plan>`, its summary's first line is
@@ -263,8 +264,10 @@ kind: code            # optional, code | design (default code)
   not judged — where `FAIL — rule <n>` (exit `1`) says *fix the plan*. Any refusal wins: a plan
   that breaks one rule while another could not run is `FAIL`. The check's conclusion stays
   `failure` either way, because GitHub counts a `neutral` check as passing a required one and an
-  unjudged plan must never merge; consumers tell the two apart by the title (or the check
-  output's `couldNotRun: true`). A `4xx` other than `429` — a wrong token, a missing record — is
+  unjudged plan must never merge; consumers tell the two apart by the published check run's
+  title (or its summary's first line). The `couldNotRun: true` field is in the `--check-output`
+  file only: the trusted job publishes just `conclusion`, `title` and `summary`, so the check
+  run on GitHub never carries it. A `4xx` other than `429` — a wrong token, a missing record — is
   an answer, not an outage, and fails its rule as before.
 - **`--pr --base <rev> --head <rev>`** is the CI mode: it lints what the pull request changed,
   reading every file of `plans/**`, `knowledge-base/**` and `integration-check/**` from git objects
