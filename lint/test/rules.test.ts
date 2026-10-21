@@ -4,9 +4,12 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
-import { httpReader } from "../alissa.ts";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { httpReader, retryAfterMs } from "../alissa.ts";
 import { githubReader } from "../github.ts";
 import { CLASS_ORDER, type RuleId, bodyProblems, lint, literalScopePath, overlaps, planClassOf, scopeProblem } from "../rules.ts";
+import { EXIT, exitCode, report } from "../plan-lint.ts";
 import { readPlanDir } from "../source.ts";
 import { type FakeAlissa, TOKEN, cliEnv, copyPlan, fakeAlissa, loadWorld, onlineAgainst, runCli, tempDir, type World } from "./helpers.ts";
 
@@ -174,6 +177,166 @@ describe("rule 12 — repositories and off-limits", () => {
   it("a wrong token is a failure, never a pass", async () => {
     const r = await lint(readPlanDir(await variant({}), null), onlineAgainst(api, "wrong"));
     assert.deepEqual([...new Set(r.failures.map((f) => f.rule))], [10, 11, 12]);
+  });
+});
+
+// Issue #13: plans PR #36 went red on rule 12 because one `GET /v1/bodies-of-work` met a 429 — the
+// plan was fine. Transient answers are retried with backoff; one that outlasts the retries is
+// "plan-lint could not run" (exit 3), never `FAIL rule 12`.
+const RATE_LIMITED = { error: "Too Many Requests", message: "You have exceeded the per-token rate limit" };
+
+/** A fetch that answers `status` to the first `times` requests under `prefix`, then the real one. */
+function flaky(prefix: string, times: number, status = 429, retryAfter: string | null = "0"): { fetchImpl: typeof fetch; hits: () => number } {
+  let left = times;
+  let hits = 0;
+  const fetchImpl: typeof fetch = async (input, init) => {
+    if (new URL(String(input)).pathname.startsWith(prefix)) {
+      hits++;
+      if (left > 0) {
+        left--;
+        return new Response(JSON.stringify(RATE_LIMITED), { status, headers: retryAfter === null ? {} : { "retry-after": retryAfter } });
+      }
+    }
+    return fetch(input, init);
+  };
+  return { fetchImpl, hits: () => hits };
+}
+
+const BOWS = "/v1/bodies-of-work";
+
+describe("Alissa reads retry 429 and 5xx with bounded backoff (issue #13)", () => {
+  const waitsOf = async (opts: { status: number; times: number; retryAfter?: string | null; retries?: number; maxRetryWaitMs?: number }) => {
+    const waits: number[] = [];
+    const { fetchImpl, hits } = flaky(BOWS, opts.times, opts.status, opts.retryAfter === undefined ? null : opts.retryAfter);
+    const reader = httpReader({
+      base: api.base, token: TOKEN, fetchImpl, sleepImpl: async (ms) => void waits.push(ms),
+      ...(opts.retries === undefined ? {} : { retries: opts.retries }),
+      ...(opts.maxRetryWaitMs === undefined ? {} : { maxRetryWaitMs: opts.maxRetryWaitMs }),
+    });
+    const answer = await reader.get(`${BOWS}?includeShared=true&limit=500`);
+    return { answer, waits, hits: hits() };
+  };
+
+  it("a 429 then a 200 answers the 200, after one wait", async () => {
+    const r = await waitsOf({ status: 429, times: 1 });
+    assert.equal(r.answer.status, 200);
+    assert.equal(r.answer.attempts, 2);
+    assert.deepEqual(r.waits, [1000]);
+  });
+
+  it("backs off exponentially — 1 s, 2 s, 4 s — over four attempts, then returns the last answer", async () => {
+    const r = await waitsOf({ status: 503, times: Infinity });
+    assert.equal(r.answer.status, 503);
+    assert.equal(r.hits, 4);
+    assert.deepEqual(r.waits, [1000, 2000, 4000]);
+  });
+
+  it("honours Retry-After, in seconds or as a date, and stops when the wait would pass the budget", async () => {
+    assert.deepEqual((await waitsOf({ status: 429, times: 2, retryAfter: "7" })).waits, [7000, 7000]);
+    assert.equal(retryAfterMs("Wed, 21 Oct 2026 07:28:30 GMT", Date.parse("Wed, 21 Oct 2026 07:28:00 GMT")), 30_000);
+    assert.equal(retryAfterMs("soon"), null);
+    const over = await waitsOf({ status: 429, times: Infinity, retryAfter: "30" });
+    assert.deepEqual(over.waits, [30_000, 30_000], "a third 30 s wait would pass the 60 s budget");
+    assert.equal(over.hits, 3);
+    const none = await waitsOf({ status: 429, times: Infinity, retryAfter: "120" });
+    assert.deepEqual(none.waits, [], "a Retry-After past the budget is not waited out");
+    assert.equal(none.answer.status, 429);
+  });
+
+  it("never retries an answer that is a no: a 404 or a 401", async () => {
+    const r = await waitsOf({ status: 401, times: Infinity });
+    assert.equal(r.answer.status, 401);
+    assert.equal(r.hits, 1);
+    assert.deepEqual(r.waits, []);
+  });
+});
+
+describe("rule 12 under a rate limit (issue #13)", () => {
+  const lintWith = async (dir: string, fetchImpl: typeof fetch) =>
+    lint(readPlanDir(dir, null), { online: true, github: githubReader({ GITHUB_API_URL: api.github }, { retries: 0 }), reader: httpReader({ base: api.base, token: TOKEN, fetchImpl, retryDelayMs: 1 }) });
+
+  it("a 429 then a 200 passes rule 12", async () => {
+    const { fetchImpl, hits } = flaky(BOWS, 1);
+    const r = await lintWith(await variant({}), fetchImpl);
+    assert.deepEqual(r.failures, []);
+    assert.equal(hits(), 2);
+    assert.equal(exitCode(report(r)), EXIT.passed);
+  });
+
+  it("a persistent 429 is 'plan-lint could not run' — exit 3 — not FAIL rule 12", async () => {
+    const { fetchImpl, hits } = flaky(BOWS, Infinity);
+    const r = await lintWith(await variant({}), fetchImpl);
+    assert.equal(hits(), 4, "four attempts");
+    assert.deepEqual(r.failures.map((f) => [f.rule, f.couldNotRun]), [[12, true]]);
+    assert.match(r.failures[0]?.message ?? "", /429 Too Many Requests — You have exceeded the per-token rate limit \(after 4 attempts\)/);
+    const out = report(r);
+    assert.equal(out.couldNotRun, true);
+    assert.equal(out.conclusion, "failure", "fail closed: an unjudged plan never passes a required check");
+    assert.match(out.title, /^plan-lint could not run — rule 12 \(repositories and off-limits\) — /);
+    assert.match(out.summary.split("\n")[0] ?? "", /^\*\*plan-lint could not run: rule 12 \(repositories and off-limits\): could not list/);
+    assert.ok(!out.lines.some((l) => /FAIL/.test(l)) && !/FAIL/.test(out.title), out.lines.join("\n"));
+    assert.equal(exitCode(out), EXIT.couldNotRun);
+  });
+
+  it("a 5xx that outlasts the retries is 'could not run' too", async () => {
+    const { fetchImpl } = flaky("/v1/factory/steering", Infinity, 502, null);
+    const r = await lintWith(await variant({}), fetchImpl);
+    assert.deepEqual(r.failures.map((f) => [f.rule, f.couldNotRun]), [[12, true]]);
+    assert.equal(exitCode(report(r)), EXIT.couldNotRun);
+  });
+
+  it("a plan that breaks a rule is refused even while another rule could not run", async () => {
+    const { fetchImpl } = flaky(BOWS, Infinity);
+    const r = await lintWith(await variant({ [NOTES]: [["TASK-100", "TASK-999"]] }), fetchImpl);
+    assert.deepEqual(r.failures.map((f) => [f.rule, f.couldNotRun === true]), [[11, false], [12, true]]);
+    const out = report(r);
+    assert.match(out.title, /^FAIL — rule 11 /);
+    assert.equal(out.couldNotRun, undefined);
+    assert.ok(out.lines.some((l) => /^plan-lint: {3}also could not run: rule 12 /.test(l)), out.lines.join("\n"));
+    assert.equal(exitCode(out), EXIT.refused);
+  });
+
+  it("an unreachable API is 'could not run' on rules 10–12", async () => {
+    const r = await lint(readPlanDir(await variant({}), null), {
+      online: true,
+      reader: httpReader({ base: "http://127.0.0.1:9", token: TOKEN, retries: 0, timeoutMs: 2000 }),
+      github: githubReader({ GITHUB_API_URL: "http://127.0.0.1:9" }, { retries: 0, timeoutMs: 2000 }),
+    });
+    assert.ok(r.failures.length > 0 && r.failures.every((f) => f.couldNotRun === true));
+    assert.match(report(r).title, /^plan-lint could not run — rule 10 /);
+  });
+
+  it("the CLI exits 3 and its check output says 'plan-lint could not run' when the API keeps answering 429", async () => {
+    // A proxy in front of the fake: 429 (Retry-After: 0, so no test time is spent waiting) to every
+    // bodies-of-work read, everything else passed through.
+    let hits = 0;
+    const proxy = createServer(async (req, res) => {
+      if ((req.url ?? "").startsWith(BOWS)) {
+        hits++;
+        res.writeHead(429, { "content-type": "application/json", "retry-after": "0" });
+        return res.end(JSON.stringify(RATE_LIMITED));
+      }
+      const up = await fetch(`${api.base}${req.url}`, { headers: { authorization: req.headers.authorization ?? "" } });
+      res.writeHead(up.status, { "content-type": "application/json" });
+      res.end(await up.text());
+    });
+    await new Promise<void>((r) => proxy.listen(0, "127.0.0.1", r));
+    try {
+      const base = `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`;
+      const out = join(tempDir("rate-limited"), "check.json");
+      const run = await runCli([await variant({}), "--no-base", "--check-output", out], { ...cliEnv(api), ALISSA_BASE: base });
+      assert.equal(run.status, 3, run.stdout + run.stderr);
+      assert.equal(hits, 4);
+      assert.match(run.stdout, /^plan-lint could not run: rule 12 /m);
+      assert.doesNotMatch(run.stdout, /FAIL/);
+      const check = JSON.parse(readFileSync(out, "utf8")) as { conclusion: string; title: string; summary: string; couldNotRun: boolean };
+      assert.equal(check.conclusion, "failure");
+      assert.equal(check.couldNotRun, true);
+      assert.match(check.title, /^plan-lint could not run — rule 12 /);
+      assert.match(check.summary, /^\*\*plan-lint could not run: /);
+    } finally {
+      await new Promise<void>((r) => proxy.close(() => r()));
+    }
   });
 });
 

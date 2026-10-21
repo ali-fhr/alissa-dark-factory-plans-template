@@ -4,7 +4,7 @@
 import { readFileSync } from "node:fs";
 import AjvModule, { type ErrorObject, type ValidateFunction } from "ajv";
 import { minimatch } from "minimatch";
-import { type AlissaPoster, type AlissaReader, AlissaUnavailable, describe } from "./alissa.ts";
+import { type AlissaPoster, type AlissaReader, AlissaUnavailable, describe, isTransient } from "./alissa.ts";
 import { contentsPath, repoPath } from "./github.ts";
 import { charLength, level2Sections, listItems, parseFrontmatter, splitFrontmatter } from "./markdown.ts";
 import {
@@ -66,6 +66,11 @@ export interface Failure {
   rule: RuleId;
   file?: string;
   message: string;
+  /**
+   * The rule could not be checked: Alissa stayed unreachable, rate-limited (429) or erroring (5xx)
+   * through every retry. Reported as "plan-lint could not run" — retry the run, not fix the plan.
+   */
+  couldNotRun?: boolean;
 }
 
 export interface LintResult {
@@ -167,8 +172,8 @@ export async function lint(src: PlanSource, opts: LintOptions): Promise<LintResu
   const failures: Failure[] = [];
   const notes = [...src.notes];
   const warnings: string[] = [];
-  const fail = (rule: RuleId, message: string, file?: string): void => {
-    failures.push(file === undefined ? { rule, message } : { rule, file, message });
+  const fail: Fail = (rule, message, file, couldNotRun = false) => {
+    failures.push({ rule, ...(file === undefined ? {} : { file }), message, ...(couldNotRun ? { couldNotRun } : {}) });
   };
 
   // Rule 1 — layout and immutability (found by the reader).
@@ -375,7 +380,7 @@ export async function lint(src: PlanSource, opts: LintOptions): Promise<LintResu
   return result(planClass, rulesRun);
 }
 
-type Fail = (rule: RuleId, message: string, file?: string) => void;
+type Fail = (rule: RuleId, message: string, file?: string, couldNotRun?: boolean) => void;
 
 /** A task's scope; a discovery task has none (schema v1.2 — feed_plan derives it under knowledge-base/). */
 function scopeOf(fm: Record<string, unknown>): string[] {
@@ -451,7 +456,7 @@ async function online(planFm: Record<string, unknown>, tasks: TaskInfo[], reader
     try {
       await fn();
     } catch (err) {
-      if (err instanceof AlissaUnavailable) fail(rule, `could not verify: ${err.message}`);
+      if (err instanceof AlissaUnavailable) fail(rule, `could not verify: ${err.message}`, undefined, true);
       else throw err;
     }
   };
@@ -461,7 +466,7 @@ async function online(planFm: Record<string, unknown>, tasks: TaskInfo[], reader
     const program = planFm.program as string;
     const res = await reader.get(`/v1/projects/${encodeURIComponent(program)}`);
     if (res.status === 404) return fail(10, `program \`${program}\` does not resolve to a project the planner can read (${describe(res)})`, "plan.md");
-    if (res.status !== 200) return fail(10, `could not read program \`${program}\`: ${describe(res)}`, "plan.md");
+    if (res.status !== 200) return fail(10, `could not read program \`${program}\`: ${describe(res)}`, "plan.md", isTransient(res.status));
     const project = (res.body as { project?: Record<string, unknown> })?.project ?? {};
     if (project.status !== "active") fail(10, `program \`${program}\` is \`${clean(project.status)}\`, not \`active\``, "plan.md");
     const milestones = (Array.isArray(project.milestones) ? project.milestones : []).filter(isRecord);
@@ -487,7 +492,7 @@ async function online(planFm: Record<string, unknown>, tasks: TaskInfo[], reader
       const oid = anchor.objectiveId as string;
       const o = await reader.get(`/v1/objectives/${encodeURIComponent(oid)}`);
       if (o.status === 404) fail(10, `the anchor's objective \`${oid}\` does not resolve (${describe(o)})`, "plan.md");
-      else if (o.status !== 200) fail(10, `could not read objective \`${oid}\`: ${describe(o)}`, "plan.md");
+      else if (o.status !== 200) fail(10, `could not read objective \`${oid}\`: ${describe(o)}`, "plan.md", isTransient(o.status));
       else {
         const body = o.body as Record<string, unknown>;
         const obj = isRecord(body?.objective) ? body.objective : body;
@@ -517,7 +522,7 @@ async function online(planFm: Record<string, unknown>, tasks: TaskInfo[], reader
   // Rule 12 — repositories and off-limits.
   await guard(12, async () => {
     const list = await reader.get(`/v1/bodies-of-work?includeShared=true&limit=500`);
-    if (list.status !== 200) return fail(12, `could not list the fleet's feed bodies of work: ${describe(list)}`);
+    if (list.status !== 200) return fail(12, `could not list the fleet's feed bodies of work: ${describe(list)}`, undefined, isTransient(list.status));
     const feeds = new Set<string>();
     const bodies = (list.body as { bodiesOfWork?: unknown[] })?.bodiesOfWork;
     for (const b of Array.isArray(bodies) ? bodies : []) {
@@ -534,7 +539,7 @@ async function online(planFm: Record<string, unknown>, tasks: TaskInfo[], reader
 
     const steering = await reader.get(`/v1/factory/steering`);
     if (steering.status === 404) return fail(12, `the steering record cannot be read (${describe(steering)}) — off-limits globs are unknown, so the rule refuses rather than guesses`);
-    if (steering.status !== 200) return fail(12, `could not read the steering record: ${describe(steering)}`);
+    if (steering.status !== 200) return fail(12, `could not read the steering record: ${describe(steering)}`, undefined, isTransient(steering.status));
     const records = (steering.body as { records?: unknown[] })?.records;
     const globs: Array<{ glob: string; from: string }> = [];
     for (const r of Array.isArray(records) ? records : []) {
@@ -567,7 +572,7 @@ async function externalEdges(tasks: TaskInfo[], reader: AlissaReader, fail: Fail
           continue;
         }
         if (res.status !== 200) {
-          fail(11, `could not read external edge \`${e.task}\`: ${describe(res)}`, t.file);
+          fail(11, `could not read external edge \`${e.task}\`: ${describe(res)}`, t.file, isTransient(res.status));
           continue;
         }
         const status = (res.body as { task?: { status?: unknown } })?.task?.status;
@@ -575,7 +580,7 @@ async function externalEdges(tasks: TaskInfo[], reader: AlissaReader, fail: Fail
           fail(11, `external edge \`${e.task}\` is \`${clean(status)}\`; it must be \`pending_validation\` or \`validated\` (§1.3)`, t.file);
         }
       } catch (err) {
-        if (err instanceof AlissaUnavailable) fail(11, `could not verify \`${e.task}\`: ${err.message}`, t.file);
+        if (err instanceof AlissaUnavailable) fail(11, `could not verify \`${e.task}\`: ${err.message}`, t.file, true);
         else throw err;
       }
     }

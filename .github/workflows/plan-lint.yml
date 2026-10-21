@@ -13,6 +13,10 @@
 #            work tree or executed). It publishes the check run named `plan-lint` on the PR's head
 #            commit — `success` with "nothing to lint" when no plans/** file changed — which is the
 #            check a ruleset requires and the close edge reads (§5.5 rule 13).
+#            The linter exits 3 when Alissa stayed unavailable through its retries (429, 5xx, no
+#            answer): the check is still a `failure` — an unjudged plan never passes a required check —
+#            but its title and its summary's first line read `plan-lint could not run`, which says
+#            "re-run me", where `FAIL — rule <n>` says "fix the plan" (README, plan-lint — usage).
 #
 # ALISSA_API_TOKEN is an ENVIRONMENT secret of `alissa-plan-lint`, never a repository secret, and only the
 # trusted job names that environment. On `pull_request` GitHub runs the workflow file from the PR's
@@ -103,7 +107,7 @@ jobs:
         run: |
           out="$RUNNER_TEMP/plan-lint-check.json"
           if [ ! -s "$out" ]; then
-            jq -n '{conclusion: "failure", title: "plan-lint could not run", summary: "The trusted job stopped before the linter reported; see the workflow run."}' > "$out"
+            jq -n '{conclusion: "failure", title: "plan-lint could not run", summary: "plan-lint could not run: the trusted job stopped before the linter reported; see the workflow run."}' > "$out"
           fi
           jq --arg sha "$HEAD_SHA" '{name: "plan-lint", head_sha: $sha, status: "completed", conclusion: .conclusion, output: {title: .title, summary: (.summary | .[0:65000])}}' "$out" \
             | gh api --method POST "repos/$GITHUB_REPOSITORY/check-runs" --input -
