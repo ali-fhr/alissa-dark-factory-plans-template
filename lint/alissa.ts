@@ -37,6 +37,8 @@ export interface HttpOptions {
 export const DEFAULT_RETRIES = 3;
 export const DEFAULT_RETRY_DELAY_MS = 1000;
 export const DEFAULT_MAX_RETRY_WAIT_MS = 60_000;
+/** The least a RateLimit-derived wait lasts: one second, since `reset` rounds down (issue #17). */
+export const MIN_RATELIMIT_RESET_MS = 1000;
 
 /** An answer that says "retry me", not "no": a rate limit or a server error. */
 export function isTransient(status: number): boolean {
@@ -61,7 +63,10 @@ export function retryAfterMs(value: string | null, now: number = Date.now()): nu
  * draft-6 `RateLimit-Reset: 42` and the draft-8 `RateLimit: "default";r=0;t=42` are read too.
  * The value is delta-seconds; one large enough to be a Unix time (some servers send that) is read
  * as one. It is the fallback for a 429 that carries no `Retry-After`: without it the exponential
- * backoff (7 s in all) would spend every attempt inside the same 60 s window.
+ * backoff (7 s in all) would spend every attempt inside the same 60 s window. The wait is never
+ * under `MIN_RATELIMIT_RESET_MS`: `reset` is delta-seconds rounded down, so `reset=0` (or a Unix
+ * reset already past) means "up to just under 1 s", and a 0 ms wait would spend the retries inside
+ * the same window. An explicit `Retry-After: 0` is honoured as sent.
  */
 export function rateLimitResetMs(headers: Headers, now: number = Date.now()): number | null {
   const fromField = (value: string | null): string | null => {
@@ -73,8 +78,8 @@ export function rateLimitResetMs(headers: Headers, now: number = Date.now()): nu
   if (raw === null || !/^\d+$/.test(raw)) return null;
   const n = Number(raw);
   // A Unix time (seconds) rather than a delta: anything past 2001-09-09 is not a window length.
-  if (n >= 1_000_000_000) return Math.max(0, n * 1000 - now);
-  return n * 1000;
+  const ms = n >= 1_000_000_000 ? n * 1000 - now : n * 1000;
+  return Math.max(MIN_RATELIMIT_RESET_MS, ms);
 }
 
 /**
