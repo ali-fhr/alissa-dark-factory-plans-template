@@ -271,10 +271,31 @@ describe("Alissa reads retry 429 and 5xx with bounded backoff (issue #13)", () =
     assert.equal(rateLimitResetMs(h({ "ratelimit-reset": String(now / 1000 + 30) }), now), 30_000, "a Unix time is read as one");
     assert.equal(rateLimitResetMs(h({ ratelimit: "limit=60, remaining=0" })), null);
     assert.equal(rateLimitResetMs(h({})), null);
+    assert.equal(rateLimitResetMs(h({ ratelimit: "limit=60, remaining=0, reset=0" })), 1_000, "reset=0 waits 1 s, not 0 ms (issue #17)");
+    assert.equal(rateLimitResetMs(h({ "ratelimit-reset": "0" })), 1_000);
+    assert.equal(rateLimitResetMs(h({ "ratelimit-reset": String(now / 1000 - 5) }), now), 1_000, "a Unix reset already past waits 1 s");
+    assert.equal(rateLimitResetMs(h({ "ratelimit-reset": String(now / 1000) }), now), 1_000);
+    assert.equal(hintedWaitMs({ status: 429, headers: h({ "retry-after": "0", ratelimit: "limit=60, remaining=0, reset=0" }) }), 0, "an explicit Retry-After: 0 is honoured");
     const both = h({ "retry-after": "3", ratelimit: "limit=60, remaining=0, reset=40" });
     assert.equal(hintedWaitMs({ status: 429, headers: both }), 3_000, "Retry-After wins");
     assert.equal(hintedWaitMs({ status: 429, headers: h({ ratelimit: "limit=60, remaining=0, reset=40" }) }), 40_000);
     assert.equal(hintedWaitMs({ status: 503, headers: h({ ratelimit: "limit=60, remaining=12, reset=40" }) }), null, "a 5xx is not a rate limit");
+  });
+
+  it("a 429 with reset=0 waits 1 s between attempts, so the next window can answer (issue #17)", async () => {
+    const waits: number[] = [];
+    let left = 1;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      if (new URL(String(input)).pathname.startsWith(BOWS) && left-- > 0) {
+        return new Response(JSON.stringify(RATE_LIMITED), { status: 429, headers: { ratelimit: "limit=60, remaining=0, reset=0" } });
+      }
+      return fetch(input, init);
+    };
+    const reader = httpReader({ base: api.base, token: TOKEN, fetchImpl, sleepImpl: async (ms) => void waits.push(ms) });
+    const answer = await reader.get(`${BOWS}?includeShared=true&limit=500`);
+    assert.deepEqual(waits, [1_000]);
+    assert.equal(answer.status, 200);
+    assert.equal(answer.attempts, 2);
   });
 
   it("a 429 with neither Retry-After nor RateLimit falls back to the exponential backoff", async () => {

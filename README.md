@@ -256,7 +256,7 @@ kind: code            # optional, code | design (default code)
 - **Transient reads are retried, then reported as "could not run".** Every Alissa (and GitHub)
   read that meets a network error, a timeout, a `429` or a `5xx` is retried — four attempts in
   all, waiting 1 s, 2 s, then 4 s, or what the answer's `Retry-After` asks (a `429` without one:
-  until its `RateLimit` header's `reset=`, so a retry leaves the 60 s window), and never more than
+  until its `RateLimit` header's `reset=`, at least 1 s, so a retry leaves the 60 s window), and never more than
   60 s of waiting for one read. A rule whose read stays unavailable through every retry **could
   not run**: the run prints `plan-lint could not run: rule <n> (<name>): …`, the check's title is
   `plan-lint could not run — rule <n> (<name>) — <plan>`, its summary's first line is
