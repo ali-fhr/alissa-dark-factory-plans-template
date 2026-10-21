@@ -18,7 +18,8 @@
 // any integration-check/** file is linted in the integration-check mode, I1–I9 (design
 // alissa-build-integration-check §3.5): I1, I2 and I4–I8 offline, I3 and I9 read Alissa; --ic runs
 // the same rules over a local run directory.
-// Exit status: 0 passed (or nothing to lint), 1 refused, 2 usage or internal error.
+// Exit status: 0 passed (or nothing to lint), 1 refused, 2 usage or internal error, 3 could not run
+// (Alissa unavailable through every retry — re-run it; the plan was not judged).
 import { appendFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,6 +45,17 @@ export interface Report {
   title: string;
   summary: string;
   lines: string[];
+  /** The run could not check a rule (Alissa unavailable through every retry): exit 3, "retry me". */
+  couldNotRun?: boolean;
+}
+
+/** Exit statuses (README, *plan-lint — usage*). */
+export const EXIT = { passed: 0, refused: 1, usage: 2, couldNotRun: 3 } as const;
+
+/** A report's exit status: a could-not-run report is never `refused` — the plan was not judged. */
+export function exitCode(r: Report): number {
+  if (r.conclusion === "success") return EXIT.passed;
+  return r.couldNotRun ? EXIT.couldNotRun : EXIT.refused;
 }
 
 export function nothingToLint(changed: number): Report {
@@ -59,28 +71,40 @@ export function nothingToLint(changed: number): Report {
 export function report(r: LintResult): Report {
   const ran = r.rulesRun.includes("5b") ? "rules 1–12 and 5b" : `rules ${r.rulesRun[0]}–${r.rulesRun[r.rulesRun.length - 1]}`;
   const head = `${r.plan} — ${r.taskCount} task(s) — plan class: ${r.planClass ?? "none"} — ${ran}`;
-  const lines = [`plan-lint: ${head}`];
-  const first = r.failures[0];
   const fmt = (f: { rule: number | "5b"; file?: string; message: string }): string =>
     `rule ${f.rule} (${RULE_NAMES[f.rule]})${f.file ? ` — ${f.file}` : ""}: ${f.message}`;
-  if (first) {
-    lines.push(`plan-lint: FAIL ${fmt(first)}`);
-    for (const f of r.failures.slice(1)) lines.push(`plan-lint:   also ${fmt(f)}`);
-  } else lines.push("plan-lint: PASS");
+  // A refusal is the verdict whenever there is one: a plan that breaks a rule is refused even when
+  // another rule could not run. Only a run whose every finding is "could not run" is that.
+  const verdict = r.failures.find((f) => !f.couldNotRun);
+  const infra = verdict === undefined ? r.failures[0] : undefined;
+  const others = r.failures.filter((f) => f !== (verdict ?? infra));
+  const lines = [`plan-lint: ${head}`];
+  if (verdict) lines.push(`plan-lint: FAIL ${fmt(verdict)}`);
+  else if (infra) lines.push(`plan-lint could not run: ${fmt(infra)}`);
+  else lines.push("plan-lint: PASS");
+  for (const f of others) lines.push(`plan-lint:   also ${f.couldNotRun ? "could not run: " : ""}${fmt(f)}`);
   for (const w of r.warnings) lines.push(`plan-lint:   warn: ${w}`);
   for (const n of r.notes) lines.push(`plan-lint:   note: ${n}`);
 
-  const md = [
-    `**plan-lint** · \`${r.plan}\` · ${r.taskCount} task(s) · plan class: \`${r.planClass ?? "none"}\` · ${ran}`,
-    "",
-    first ? `**FAIL — ${fmt(first)}**` : "**PASS**",
-  ];
-  if (r.failures.length > 1) md.push("", "Every finding, in rule order:", "", ...r.failures.map((f) => `- ${fmt(f)}`));
+  const header = `**plan-lint** · \`${r.plan}\` · ${r.taskCount} task(s) · plan class: \`${r.planClass ?? "none"}\` · ${ran}`;
+  const md = infra
+    ? [
+      `**plan-lint could not run: ${fmt(infra)}**`,
+      "",
+      header,
+      "",
+      "The Alissa API stayed unavailable (unreachable, 429 or 5xx) through every retry, so the plan was not judged. Re-run the job; nothing in the plan needs fixing for this.",
+    ]
+    : [header, "", verdict ? `**FAIL — ${fmt(verdict)}**` : "**PASS**"];
+  const tag = (f: (typeof r.failures)[number]): string => `${f.couldNotRun ? "could not run — " : ""}${fmt(f)}`;
+  if (r.failures.length > 1) md.push("", "Every finding, in rule order:", "", ...r.failures.map((f) => `- ${tag(f)}`));
   if (r.warnings.length > 0) md.push("", "Warnings (not checked — never a pass):", "", ...r.warnings.map((w) => `- ${w}`));
   if (r.notes.length > 0) md.push("", "Notes:", "", ...r.notes.map((n) => `- ${n}`));
   const warned = r.warnings.length > 0 ? ` — ${r.warnings.length} warning(s)` : "";
-  const title = first ? `FAIL — rule ${first.rule} (${RULE_NAMES[first.rule]}) — ${r.plan}` : `PASS — ${r.plan} — plan class ${r.planClass ?? "none"}${warned}`;
-  return { conclusion: first ? "failure" : "success", title, summary: md.join("\n"), lines };
+  const title = verdict ? `FAIL — rule ${verdict.rule} (${RULE_NAMES[verdict.rule]}) — ${r.plan}`
+    : infra ? `plan-lint could not run — rule ${infra.rule} (${RULE_NAMES[infra.rule]}) — ${r.plan}`
+    : `PASS — ${r.plan} — plan class ${r.planClass ?? "none"}${warned}`;
+  return { conclusion: r.failures.length > 0 ? "failure" : "success", title, summary: md.join("\n"), lines, ...(infra ? { couldNotRun: true } : {}) };
 }
 
 /**
@@ -111,7 +135,7 @@ export function reportKb(r: KbLintResult): Report {
   const title = !first ? `PASS — knowledge-base — ${r.target}`
     : first.couldNotRun ? `plan-lint could not run — ${first.rule} (${K_RULE_NAMES[first.rule]}) — ${r.target}`
     : `FAIL — ${first.rule} (${K_RULE_NAMES[first.rule]}) — knowledge-base — ${r.target}`;
-  return { conclusion: first ? "failure" : "success", title, summary: md.join("\n"), lines };
+  return { conclusion: first ? "failure" : "success", title, summary: md.join("\n"), lines, ...(first?.couldNotRun ? { couldNotRun: true } : {}) };
 }
 
 /** The integration-check mode's report. Its titles say `integration-check`, which the merge edge reads (§3.6). */
@@ -133,7 +157,7 @@ export function reportIc(r: IcLintResult): Report {
   const title = !first ? `PASS — integration-check — ${r.target}`
     : first.couldNotRun ? `plan-lint could not run — ${first.rule} (${I_RULE_NAMES[first.rule]}) — ${r.target}`
     : `FAIL — ${first.rule} (${I_RULE_NAMES[first.rule]}) — integration-check — ${r.target}`;
-  return { conclusion: first ? "failure" : "success", title, summary: md.join("\n"), lines };
+  return { conclusion: first ? "failure" : "success", title, summary: md.join("\n"), lines, ...(first?.couldNotRun ? { couldNotRun: true } : {}) };
 }
 
 /** `--write`: render the Summary and the Dependency graph into plan.md. Returns whether it changed. */
@@ -239,8 +263,10 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
     }
     for (const l of out.lines) console.log(l);
     if (values["summary-file"]) appendFileSync(values["summary-file"], `${out.summary}\n`);
-    if (values["check-output"]) writeFileSync(values["check-output"], JSON.stringify({ conclusion: out.conclusion, title: out.title, summary: out.summary }));
-    return out.conclusion === "success" ? 0 : 1;
+    if (values["check-output"]) {
+      writeFileSync(values["check-output"], JSON.stringify({ conclusion: out.conclusion, title: out.title, summary: out.summary, couldNotRun: out.couldNotRun === true }));
+    }
+    return exitCode(out);
   } catch (err) {
     if (err instanceof UsageError) {
       console.error(`plan-lint: ${err.message}`);

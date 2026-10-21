@@ -104,9 +104,9 @@ describe("knowledge-base fixtures (c2)", () => {
       else assert.ok(r.failures.every((f) => !f.couldNotRun), "a refusal, not a run that could not happen");
     });
 
-    it(`${name}: the CLI exits 1 and the verdict names ${rule}`, async () => {
+    it(`${name}: the CLI exits ${couldNotRun ? 3 : 1} and the verdict names ${rule}`, async () => {
       const run = await runCli(["--kb", kbFixture(name), "--no-base"], cliEnv(api));
-      assert.equal(run.status, 1, run.stdout + run.stderr);
+      assert.equal(run.status, couldNotRun ? 3 : 1, run.stdout + run.stderr);
       const verdict = run.stdout.split("\n").find((l) => l.startsWith("plan-lint: FAIL "));
       assert.ok(verdict?.startsWith(`plan-lint: FAIL ${rule} (${K_RULE_NAMES[rule]})`), run.stdout);
     });
@@ -170,10 +170,10 @@ describe("K7 through Studio's verify route (c4)", () => {
     });
   }
 
-  it("route unreachable: the CLI exits 1 and the check output says 'plan-lint could not run'", async () => {
+  it("route unreachable: the CLI exits 3 and the check output says 'plan-lint could not run'", async () => {
     const out = join(tempDir("kb-down"), "check.json");
     const run = await runCli(["--kb", kbFixture("kb-golden"), "--no-base", "--check-output", out], { ALISSA_API_TOKEN: TOKEN, ALISSA_BASE: "http://127.0.0.1:9" });
-    assert.equal(run.status, 1, run.stdout + run.stderr);
+    assert.equal(run.status, 3, run.stdout + run.stderr);
     const check = JSON.parse(readFileSync(out, "utf8")) as { conclusion: string; title: string };
     assert.equal(check.conclusion, "failure");
     assert.match(check.title, /^plan-lint could not run/);
@@ -504,7 +504,7 @@ describe("findings v1.1 — the URL cite, K8 and the review line (DS-10)", () =>
     ] as const) {
       const out = join(tempDir("kb-k8"), "check.json");
       const run = await runCli(["--kb", kbFixture(name), "--no-base", "--check-output", out], cliEnv(api));
-      assert.equal(run.status, 1, run.stdout + run.stderr);
+      assert.equal(run.status, name === "kb-k8-unavailable" ? 3 : 1, run.stdout + run.stderr);
       const check = JSON.parse(readFileSync(out, "utf8")) as { conclusion: string; title: string };
       assert.equal(check.conclusion, "failure");
       assert.match(check.title, title, name);

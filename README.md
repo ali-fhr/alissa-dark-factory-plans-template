@@ -240,7 +240,9 @@ kind: code            # optional, code | design (default code)
 - **The verdict names the rule.** Every rule runs; the first failure, in rule order, is the
   verdict (`plan-lint: FAIL rule <n> (<name>) — <file>: …`), every other finding follows it, and
   the header line carries the task count and the **plan's class** — the most severe `commitClass`
-  of its tasks in §7.1's order. Exit status: `0` passed, `1` refused, `2` a usage or read error.
+  of its tasks in §7.1's order. Exit status: `0` passed, `1` refused, `2` a usage or read error,
+  `3` **could not run** (below) — in every mode; `lint/VERSION`'s `exit-codes: 0 1 2 3` says a
+  linter knows `3`.
 - **`--write` is idempotent.** It rewrites only the text between the `plan-summary` and `plan-dag`
   markers of `plan.md` (inserting the markers under `## Summary` and `## Dependency graph` when
   they are missing), from the task files alone; a second run changes nothing. Commit what it wrote —
@@ -251,6 +253,19 @@ kind: code            # optional, code | design (default code)
   skip rules 10–12; an Alissa read that errors fails its rule. Rule 5b's unreadable GitHub reads
   are warnings by design (D12), listed under the verdict and counted in the check's title. `ALISSA_BASE` overrides
   `https://api.alissa.app`.
+- **Transient reads are retried, then reported as "could not run".** Every Alissa (and GitHub)
+  read that meets a network error, a timeout, a `429` or a `5xx` is retried — four attempts in
+  all, waiting 1 s, 2 s, then 4 s, or what the answer's `Retry-After` asks, and never more than
+  60 s of waiting for one read. A rule whose read stays unavailable through every retry **could
+  not run**: the run prints `plan-lint could not run: rule <n> (<name>): …`, the check's title is
+  `plan-lint could not run — rule <n> (<name>) — <plan>`, its summary's first line is
+  `**plan-lint could not run: …**`, and the linter exits `3`. That says *re-run me* — the plan was
+  not judged — where `FAIL — rule <n>` (exit `1`) says *fix the plan*. Any refusal wins: a plan
+  that breaks one rule while another could not run is `FAIL`. The check's conclusion stays
+  `failure` either way, because GitHub counts a `neutral` check as passing a required one and an
+  unjudged plan must never merge; consumers tell the two apart by the title (or the check
+  output's `couldNotRun: true`). A `4xx` other than `429` — a wrong token, a missing record — is
+  an answer, not an outage, and fails its rule as before.
 - **`--pr --base <rev> --head <rev>`** is the CI mode: it lints what the pull request changed,
   reading every file of `plans/**`, `knowledge-base/**` and `integration-check/**` from git objects
   as data. Any `integration-check/**` change selects the integration-check mode (below); otherwise
@@ -409,8 +424,8 @@ npm run plan-lint -- --kb knowledge-base/assessments/shop-2026-10-14.md --task T
   `light`.
 - **Fail closed.** When the route is down, answers an error or an unexpected shape — or Alissa
   cannot be read for K6, or K8's route answers `unavailable` for a cite — the run reports
-  **`plan-lint could not run`**: the check's conclusion is `failure` and its title starts with those
-  words. It is never a pass. Without `ALISSA_API_TOKEN` the linter refuses to run rather than skip
+  **`plan-lint could not run`**: the check's conclusion is `failure`, its title starts with those
+  words and the linter exits `3`. It is never a pass. Without `ALISSA_API_TOKEN` the linter refuses to run rather than skip
   K6–K8.
 - **The check's title says the mode**: `PASS — knowledge-base — <dir>`, `FAIL — K<n> (<name>) —
   knowledge-base — <dir>`, or `plan-lint could not run — K<n> (<name>) — <dir>`. orcloop's merge
@@ -484,7 +499,7 @@ npm run plan-lint -- --ic integration-check/2026/10/18/shop-m1 --task TASK-3000 
   integration-check — <dir>`, or `plan-lint could not run — I<n> (<name>) — <dir>`. orcloop's merge
   edge merges an integration-check PR on the first of these (design §3.6).
 - **Fail closed**, as the knowledge-base mode: when Alissa cannot be read for I3 or I9 the run
-  reports **`plan-lint could not run`**, a `failure`, never a pass; without `ALISSA_API_TOKEN` the
+  reports **`plan-lint could not run`**, a `failure` (exit `3`), never a pass; without `ALISSA_API_TOKEN` the
   linter refuses to run rather than skip I3 and I9.
 - **What git will push.** CI reads the commit, while `--ic` reads the file system. So inside a
   git work tree, `--ic` refuses (I1) any run file that git ignores, and notes any file that is
