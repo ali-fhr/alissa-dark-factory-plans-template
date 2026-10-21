@@ -55,6 +55,38 @@ export function retryAfterMs(value: string | null, now: number = Date.now()): nu
   return Number.isNaN(at) ? null : Math.max(0, at - now);
 }
 
+/**
+ * The rate-limit window's reset in milliseconds, from the IETF RateLimit headers, or `null` when
+ * neither gives one. Alissa sends the draft-7 `RateLimit: limit=60, remaining=0, reset=42`; the
+ * draft-6 `RateLimit-Reset: 42` and the draft-8 `RateLimit: "default";r=0;t=42` are read too.
+ * The value is delta-seconds; one large enough to be a Unix time (some servers send that) is read
+ * as one. It is the fallback for a 429 that carries no `Retry-After`: without it the exponential
+ * backoff (7 s in all) would spend every attempt inside the same 60 s window.
+ */
+export function rateLimitResetMs(headers: Headers, now: number = Date.now()): number | null {
+  const fromField = (value: string | null): string | null => {
+    if (value === null) return null;
+    const m = /(?:^|[\s,;])(?:reset|t)\s*=\s*(\d+)\b/i.exec(value);
+    return m ? m[1]! : null;
+  };
+  const raw = fromField(headers.get("ratelimit")) ?? headers.get("ratelimit-reset")?.trim() ?? null;
+  if (raw === null || !/^\d+$/.test(raw)) return null;
+  const n = Number(raw);
+  // A Unix time (seconds) rather than a delta: anything past 2001-09-09 is not a window length.
+  if (n >= 1_000_000_000) return Math.max(0, n * 1000 - now);
+  return n * 1000;
+}
+
+/**
+ * What a transient answer asks to be waited before the next attempt: its `Retry-After`, else, for
+ * a 429, the RateLimit window's reset; `null` leaves the exponential backoff to decide.
+ */
+export function hintedWaitMs(res: { status: number; headers: Headers }, now: number = Date.now()): number | null {
+  const after = retryAfterMs(res.headers.get("retry-after"), now);
+  if (after !== null) return after;
+  return res.status === 429 ? rateLimitResetMs(res.headers, now) : null;
+}
+
 /** A POST whose answer is a read: Studio's `POST /v1/factory/repo-files/verify` (K7) and `POST /v1/factory/url-cites/verify` (K8). */
 export interface AlissaPoster {
   post(path: string, body: unknown): Promise<Answer>;
@@ -63,7 +95,7 @@ export interface AlissaPoster {
 /**
  * One request with bounded retry: a network error, a timeout, a 429 or a 5xx is retried with
  * exponential backoff (`retryDelayMs`, doubling), or after the answer's `Retry-After` when it gives
- * one, until `retries` are spent or the next wait would take the request past `maxRetryWaitMs` of
+ * one (a 429 without one: after its RateLimit window's reset, `rateLimitResetMs`), until `retries` are spent or the next wait would take the request past `maxRetryWaitMs` of
  * waiting. A transient answer that outlasts the retries is returned as it is (callers read
  * `isTransient`); a network error that outlasts them throws `AlissaUnavailable`.
  */
@@ -106,7 +138,7 @@ function requester(opts: HttpOptions): (method: "GET" | "POST", path: string, bo
         const tries = attempt + 1;
         throw new AlissaUnavailable(`${method} ${path} failed after ${tries} attempt(s): ${err instanceof Error ? err.message : String(err)}`);
       }
-      if (isTransient(res.status) && (await backoff(attempt, retryAfterMs(res.headers.get("retry-after"))))) {
+      if (isTransient(res.status) && (await backoff(attempt, hintedWaitMs(res)))) {
         await res.body?.cancel();
         continue;
       }

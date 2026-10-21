@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { httpReader, retryAfterMs } from "../alissa.ts";
+import { hintedWaitMs, httpReader, rateLimitResetMs, retryAfterMs } from "../alissa.ts";
 import { githubReader } from "../github.ts";
 import { CLASS_ORDER, type RuleId, bodyProblems, lint, literalScopePath, overlaps, planClassOf, scopeProblem } from "../rules.ts";
 import { EXIT, exitCode, report } from "../plan-lint.ts";
@@ -241,6 +241,47 @@ describe("Alissa reads retry 429 and 5xx with bounded backoff (issue #13)", () =
     const none = await waitsOf({ status: 429, times: Infinity, retryAfter: "120" });
     assert.deepEqual(none.waits, [], "a Retry-After past the budget is not waited out");
     assert.equal(none.answer.status, 429);
+  });
+
+  it("a 429 without Retry-After waits out the RateLimit window's reset (issue #15)", async () => {
+    const waits: number[] = [];
+    let left = 2;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      if (new URL(String(input)).pathname.startsWith(BOWS) && left-- > 0) {
+        return new Response(JSON.stringify(RATE_LIMITED), {
+          status: 429,
+          headers: { "ratelimit-policy": "60;w=60", ratelimit: "limit=60, remaining=0, reset=42" },
+        });
+      }
+      return fetch(input, init);
+    };
+    const reader = httpReader({ base: api.base, token: TOKEN, fetchImpl, sleepImpl: async (ms) => void waits.push(ms) });
+    const answer = await reader.get(`${BOWS}?includeShared=true&limit=500`);
+    assert.deepEqual(waits, [42_000], "the second 42 s wait would pass the 60 s budget");
+    assert.equal(answer.status, 429);
+    assert.equal(answer.attempts, 2);
+  });
+
+  it("reads the reset from draft-6, draft-7 and draft-8 RateLimit headers, and prefers Retry-After", () => {
+    const h = (init: Record<string, string>) => new Headers(init);
+    const now = Date.parse("2026-10-21T07:28:00Z");
+    assert.equal(rateLimitResetMs(h({ ratelimit: "limit=60, remaining=0, reset=17" })), 17_000);
+    assert.equal(rateLimitResetMs(h({ "ratelimit-reset": "9" })), 9_000);
+    assert.equal(rateLimitResetMs(h({ ratelimit: '"default";r=0;t=5' })), 5_000);
+    assert.equal(rateLimitResetMs(h({ "ratelimit-reset": String(now / 1000 + 30) }), now), 30_000, "a Unix time is read as one");
+    assert.equal(rateLimitResetMs(h({ ratelimit: "limit=60, remaining=0" })), null);
+    assert.equal(rateLimitResetMs(h({})), null);
+    const both = h({ "retry-after": "3", ratelimit: "limit=60, remaining=0, reset=40" });
+    assert.equal(hintedWaitMs({ status: 429, headers: both }), 3_000, "Retry-After wins");
+    assert.equal(hintedWaitMs({ status: 429, headers: h({ ratelimit: "limit=60, remaining=0, reset=40" }) }), 40_000);
+    assert.equal(hintedWaitMs({ status: 503, headers: h({ ratelimit: "limit=60, remaining=12, reset=40" }) }), null, "a 5xx is not a rate limit");
+  });
+
+  it("a 429 with neither Retry-After nor RateLimit falls back to the exponential backoff", async () => {
+    const r = await waitsOf({ status: 429, times: Infinity, retryAfter: null });
+    assert.equal(r.answer.status, 429);
+    assert.equal(r.hits, 4);
+    assert.deepEqual(r.waits, [1000, 2000, 4000]);
   });
 
   it("never retries an answer that is a no: a 404 or a 401", async () => {
