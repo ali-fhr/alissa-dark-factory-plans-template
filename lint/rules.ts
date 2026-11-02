@@ -2,6 +2,7 @@
 // order over one plan. Every rule runs (so a fixture can prove it fails exactly one); the verdict is
 // the first failure, with its rule named.
 import { readFileSync } from "node:fs";
+import { isIP } from "node:net";
 import AjvModule, { type ErrorObject, type ValidateFunction } from "ajv";
 import { minimatch } from "minimatch";
 import { type AlissaPoster, type AlissaReader, AlissaUnavailable, describe, isTransient } from "./alissa.ts";
@@ -672,7 +673,7 @@ function sortFailures(f: Failure[]): Failure[] {
   return f.map((x, i) => ({ x, i })).sort((a, b) => ruleRank(a.x.rule) - ruleRank(b.x.rule) || a.i - b.i).map(({ x }) => x);
 }
 
-// ── The knowledge-base mode: K1–K9 (design alissa-build-discovery §3.4) ──────────────────────────
+// ── The knowledge-base mode: K1–K9 (design alissa-build-discovery §3.4); K10–K14 below (SR-2) ─────
 // A pull request that changes any `knowledge-base/**` file is linted under these rules, numbered
 // apart from §5.5's. K1–K5 need no network; K6 reads the task with the lint token, K7 asks
 // Studio's verify route whether each repo cite holds at its pinned SHA, and K8 (v1.1) asks Studio's
@@ -683,7 +684,7 @@ function sortFailures(f: Failure[]): Failure[] {
 // (operator decision 2026-10-20): K1 types it, K4 caps it, K5 scans its text and K9 — offline, like
 // K1–K5 — holds every file and every `evidence:<file>` cite to each other.
 
-export type KRule = "K1" | "K2" | "K3" | "K4" | "K5" | "K6" | "K7" | "K8" | "K9";
+export type KRule = "K1" | "K2" | "K3" | "K4" | "K5" | "K6" | "K7" | "K8" | "K9" | "K10" | "K11" | "K12" | "K13" | "K14";
 
 export const K_RULE_NAMES: Readonly<Record<KRule, string>> = {
   K1: "layout and immutability",
@@ -695,6 +696,11 @@ export const K_RULE_NAMES: Readonly<Record<KRule, string>> = {
   K7: "cites resolve",
   K8: "external cites hold",
   K9: "evidence cited",
+  K10: "security shape",
+  K11: "security key",
+  K12: "cited finding",
+  K13: "no secrets in scenario",
+  K14: "security file",
 };
 
 /** The rules a run made, as the report names them: `K1–K5, K9`, `K1–K9`, `K1, K5`. */
@@ -950,6 +956,8 @@ export const FINDINGS_SCHEMA_V1 = "alissa-findings/v1";
 export const FINDINGS_SCHEMA_V11 = "alissa-findings/v1.1";
 /** v1.2 (operator decision 2026-10-20): the evidence cite, `{ kind: evidence, file }`. */
 export const FINDINGS_SCHEMA_V12 = "alissa-findings/v1.2";
+/** v1.3 (design alissa-security-review §5.1, lane SR-2): a question's `security` block and the file's `kind: security_review`. */
+export const FINDINGS_SCHEMA_V13 = "alissa-findings/v1.3";
 
 /** Studio's cite check (lane DS-3), on the lint token. */
 export const VERIFY_ROUTE = "/v1/factory/repo-files/verify";
@@ -1185,7 +1193,7 @@ const CITE_PATH_RE = /^\/(questions|risks)\/(\d+)\/cites\/(\d+)/;
 function kbSchemaErrors(errors: ErrorObject[], fm: unknown): Array<ErrorObject | string> {
   const doc = isRecord(fm) ? fm : {};
   const v1 = doc.schema === FINDINGS_SCHEMA_V1;
-  const v12 = doc.schema === FINDINGS_SCHEMA_V12;
+  const v12 = doc.schema === FINDINGS_SCHEMA_V12 || doc.schema === FINDINGS_SCHEMA_V13;
   const out: Array<ErrorObject | string> = [];
   const said = new Set<string>();
   const say = (x: ErrorObject | string): void => {
@@ -1202,6 +1210,10 @@ function kbSchemaErrors(errors: ErrorObject[], fm: unknown): Array<ErrorObject |
       say(both ? "carries both `project` and `bodyOfWork` — a finding is keyed by exactly one of them (§4.6)" : "carries neither `project` nor `bodyOfWork` — a finding is keyed by exactly one of them (§4.6)");
       continue;
     }
+    if (e.keyword === "false schema" && e.instancePath === "/kind") {
+      say(`frontmatter carries \`kind\` — it needs \`schema: ${FINDINGS_SCHEMA_V13}\` (alissa-security-review §5.1)`);
+      continue;
+    }
     const m = CITE_PATH_RE.exec(e.instancePath);
     if (m) {
       const list = doc[m[1] as string];
@@ -1216,7 +1228,7 @@ function kbSchemaErrors(errors: ErrorObject[], fm: unknown): Array<ErrorObject |
         continue;
       }
       if (evidence && !v12) {
-        say(`frontmatter ${e.instancePath.slice(0, m[0].length)} is an evidence cite — it needs \`schema: ${FINDINGS_SCHEMA_V12}\``);
+        say(`frontmatter ${e.instancePath.slice(0, m[0].length)} is an evidence cite — it needs \`schema: ${FINDINGS_SCHEMA_V12}\` or later`);
         continue;
       }
       const branch = e.schemaPath.startsWith("#/definitions/urlCite/") ? "url"
@@ -1325,6 +1337,7 @@ export async function lintKb(src: KbSource, opts: KbLintOptions): Promise<KbLint
       if (!validate(parsed.value)) {
         for (const e of kbSchemaErrors(validate.errors ?? [], parsed.value)) {
           if (typeof e === "string") k2fail(e);
+          else if (SECURITY_PATH_RE.test(e.instancePath)) securitySchemaError(e, parsed.value, fail);
           else if (isKbSizeError(e)) fail("K4", `frontmatter ${ajvMessage(e)} (§2.3)`, FINDINGS_FILE);
           else if (e.keyword === "type" && /\/(sha|blob|lines)$/.test(e.instancePath)) k2fail(`frontmatter ${ajvMessage(e)} — YAML reads an all-digit value as a number; quote it`);
           else k2fail(`frontmatter ${ajvMessage(e)}`);
@@ -1438,26 +1451,170 @@ export async function lintKb(src: KbSource, opts: KbLintOptions): Promise<KbLint
     }
   } else notes.push("K9's uncited-file check not run: the frontmatter is not valid (K2), so its evidence cites could not be read");
 
+  // K10–K14 — the security block (v1.3, design alissa-security-review §5.2). A block the schema
+  // refused was reported above (K10, or K11 for its key); the rules below read the blocks that parsed.
+  if (fm) kbSecurity(fm, questions, fail);
+
   // §3.6 — the review line: `light` for any URL cite or any `high`-impact question, else `none`.
+  // A `critical` or `high` security block counts as impact `high` (alissa-security-review §5.2).
   if (fm) {
-    const high = questions.filter((q) => ((q.unblocks as Array<{ impact?: unknown }> | undefined) ?? []).some((u) => u.impact === "high")).map((q) => q.id as string);
+    const high = questions.filter((q) =>
+      ((q.unblocks as Array<{ impact?: unknown }> | undefined) ?? []).some((u) => u.impact === "high") || isHighSecurity(q.security)).map((q) => q.id as string);
     const reasons = [...(urlCites.length > 0 ? [`external cites: ${urlCites.length}`] : []), ...(high.length > 0 ? [`high impact: ${high.join(", ")}`] : [])];
     review = { level: reasons.length > 0 ? "light" : "none", reasons };
   } else notes.push("Discovery-Review: not classified — the frontmatter is not valid (K2); a reader treats a missing line as light");
 
   if (!opts.online) {
     notes.push("K6–K8 not run (offline)");
-    return result(["K1", "K2", "K3", "K4", "K5", "K9"]);
+    return result(["K1", "K2", "K3", "K4", "K5", "K9", ...SECURITY_RULES]);
   }
   if (!fm) {
     notes.push("K6–K8 not evaluated: the frontmatter is not valid (K2)");
-    return result(["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9"]);
+    return result(["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9", ...SECURITY_RULES]);
   }
   await kbTask(fm, src, urlCites.length, opts.reader, fail);
   await kbCites(repoCites, fm.reads as Array<{ repo: string; sha: string }>, opts.verifier, fail, notes);
   if (urlCites.length > KB_LIMITS.urlCitesMax) notes.push(`K8 not run: ${urlCites.length} URL cites is past the route's ${KB_LIMITS.urlCitesMax} (K4)`);
   else await kbUrlCites(urlCites, opts.verifier, fail, notes);
-  return result(["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9"]);
+  return result(["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9", ...SECURITY_RULES]);
+}
+
+// ── K10–K14: the security block (design alissa-security-review §5.1, §5.2, lane SR-2) ─────────────
+// Offline, like K1–K5 and K9. K10 holds the block to the schema and its severity to §5.1's table;
+// K11 its key; K12 its question's status and cites; K13 its free text; K14 the file's `kind`.
+
+const SECURITY_RULES: readonly KRule[] = ["K10", "K11", "K12", "K13", "K14"];
+/** A schema error inside a question's `security` block. */
+const SECURITY_PATH_RE = /^\/questions\/(\d+)\/security(?:\/|$)/;
+/** K11's key grammar, the schema's own (§5.1). */
+export const SECURITY_KEY_RE = /^[a-z0-9.-]{1,80}$/;
+export const SECURITY_SEVERITIES = ["critical", "high", "medium", "low"] as const;
+export type SecuritySeverity = (typeof SECURITY_SEVERITIES)[number];
+/** The hosts a scenario or a fix may link to in full (K13): the code host the repositories live on. */
+export const SECURITY_REPOSITORY_HOSTS = ["github.com"] as const;
+
+/**
+ * §5.1's table: the severity a consequence calls for when the finding is reachable (`yes` or
+ * `unknown`). `security` spans two rows — `critical` with no precondition, `high` behind an
+ * authenticated user — and the block does not say which, so either is on the table for it.
+ * Unreachable (`reachable: no`) is `low` for every consequence.
+ */
+const SEVERITY_TABLE: Readonly<Record<string, readonly SecuritySeverity[]>> = {
+  money: ["critical"], data: ["critical"], security: ["critical", "high"],
+  correctness: ["medium"], leak: ["medium"], alarm: ["medium"], stall: ["medium"], contract: ["medium"],
+  cosmetic: ["low"], "redundant-test": ["low"], hypothetical: ["low"],
+};
+
+/** The severities §5.1's table gives a consequence at a reachability. */
+export function tableSeverities(consequence: string, reachable: string): readonly SecuritySeverity[] {
+  if (reachable === "no") return ["low"];
+  return SEVERITY_TABLE[consequence] ?? [];
+}
+
+/** How many steps `severity` stands from the nearest severity the table gives (K10). */
+export function severitySteps(severity: SecuritySeverity, consequence: string, reachable: string): number {
+  const at = SECURITY_SEVERITIES.indexOf(severity);
+  return Math.min(...tableSeverities(consequence, reachable).map((t) => Math.abs(SECURITY_SEVERITIES.indexOf(t) - at)));
+}
+
+/** Does a question's `security` block put it at impact `high` for the review line (§5.2)? */
+function isHighSecurity(security: unknown): boolean {
+  return isRecord(security) && (security.severity === "critical" || security.severity === "high");
+}
+
+/** A schema error inside a `security` block, as K10 (or K11, for the key's grammar) reports it. */
+function securitySchemaError(e: ErrorObject, fm: unknown, fail: KbFail): void {
+  const m = SECURITY_PATH_RE.exec(e.instancePath) as RegExpExecArray;
+  const doc = isRecord(fm) ? fm : {};
+  const q = Array.isArray(doc.questions) ? doc.questions[Number(m[1])] : undefined;
+  const id = isRecord(q) && typeof q.id === "string" ? q.id : `#${m[1]}`;
+  if (e.keyword === "false schema") {
+    return fail("K10", `question \`${clean(id)}\` carries a \`security\` block — it needs \`schema: ${FINDINGS_SCHEMA_V13}\` (alissa-security-review §5.1)`, FINDINGS_FILE);
+  }
+  if (e.instancePath.endsWith("/security/key") && e.keyword === "pattern") {
+    const key = isRecord(q) && isRecord(q.security) ? q.security.key : undefined;
+    return fail("K11", `question \`${clean(id)}\`: the \`security.key\` \`${clean(key)}\` is not \`[a-z0-9.-]{1,80}\` — a stable slug of repository, category and symbol (§4.2)`, FINDINGS_FILE);
+  }
+  fail("K10", `question \`${clean(id)}\`: frontmatter ${ajvMessage(e)}`, FINDINGS_FILE);
+}
+
+/** The blocks of a schema-valid frontmatter's questions that are well formed (the schema's errors were K10's or K11's). */
+function securityBlocks(questions: Array<Record<string, unknown>>): Array<{ q: Record<string, unknown>; id: string; s: Record<string, unknown> }> {
+  const out = [];
+  for (const q of questions) if (isRecord(q.security)) out.push({ q, id: clean(q.id), s: q.security });
+  return out;
+}
+
+/** K10–K14 over a frontmatter K2 admitted. */
+function kbSecurity(fm: Record<string, unknown>, questions: Array<Record<string, unknown>>, fail: KbFail): void {
+  const blocks = securityBlocks(questions);
+  const keys = new Map<string, string>();
+  for (const { q, id, s } of blocks) {
+    // K10 — severity against §5.1's table: more than one step off, with no `calibration` reason.
+    const severity = s.severity, consequence = s.consequence, reachable = s.reachable;
+    if (typeof severity === "string" && (SECURITY_SEVERITIES as readonly string[]).includes(severity) && typeof consequence === "string" && typeof reachable === "string") {
+      const table = tableSeverities(consequence, reachable);
+      const calibrated = typeof s.calibration === "string" && s.calibration.trim() !== "";
+      if (table.length > 0 && severitySteps(severity as SecuritySeverity, consequence, reachable) > 1 && !calibrated) {
+        fail("K10", `question \`${id}\`: \`severity: ${severity}\` is more than one step from §5.1's table (\`${consequence}\`, \`reachable: ${reachable}\` → ${table.map((t) => `\`${t}\``).join(" or ")}) and carries no \`calibration\` reason`, FINDINGS_FILE);
+      }
+    }
+    // K11 — one key per finding in the file (its grammar is the schema's, reported above).
+    if (typeof s.key === "string" && SECURITY_KEY_RE.test(s.key)) {
+      const first = keys.get(s.key);
+      if (first !== undefined) fail("K11", `questions \`${first}\` and \`${id}\` share the \`security.key\` \`${s.key}\` — a key names one finding across runs (§4.2)`, FINDINGS_FILE);
+      else keys.set(s.key, id);
+    }
+    // K12 — a security finding is answered (or partly) and cites the code or its evidence.
+    if (q.status !== "answered" && q.status !== "partial") fail("K12", `question \`${id}\` is \`${clean(q.status)}\` but carries a \`security\` block — a finding is \`answered\` or \`partial\``, FINDINGS_FILE);
+    const cites = Array.isArray(q.cites) ? (q.cites as unknown[]) : [];
+    if (!cites.some((c) => isRecord(c) && c.kind !== "url")) fail("K12", `question \`${id}\` carries a \`security\` block but no repo or evidence cite — a finding is grounded in the code at the pinned SHA`, FINDINGS_FILE);
+    // K13 — the free text holds no secret, no link off the code host and no address.
+    for (const field of ["scenario", "fix"] as const) {
+      const text = s[field];
+      if (typeof text !== "string") continue;
+      for (const why of securityTextRefusals(text)) fail("K13", `question \`${id}\`: \`security.${field}\` carries ${why}`, FINDINGS_FILE);
+    }
+  }
+  // K14 — a file with a security finding says it is a security review's, so the projection can gate it (§8).
+  if (blocks.length > 0 && fm.kind !== "security_review") {
+    fail("K14", `${blocks.length} question(s) carry a \`security\` block (${blocks.map((b) => `\`${b.id}\``).join(", ")}) but the frontmatter has no \`kind: security_review\` — the projection gates a security review's findings by it (alissa-security-review §8)`, FINDINGS_FILE);
+  }
+}
+
+const SCHEME_URL_RE = /\b[a-z][a-z0-9+.-]{0,31}:\/\/[^\s<>"'`)\]]+/gi;
+const IPV4_CANDIDATE_RE = /(?<![0-9.])\d{1,3}(?:\.\d{1,3}){3}(?![0-9]|\.\d)/g;
+const IPV6_CANDIDATE_RE = /(?<![0-9A-Za-z:])[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?:%[0-9A-Za-z]+)?(?![0-9A-Za-z:])/g;
+
+/** The host of a scheme URL, lower case, or null when it has none. */
+function urlHost(raw: string): string | null {
+  try {
+    return new URL(raw).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Why a `scenario` or a `fix` may not be published as written (K13), never quoting the offending
+ * text: a secret-shaped string (K5's token shapes), a full URL to a host other than the code host,
+ * or an IP address (v4, or v6 as `node:net` reads it).
+ */
+export function securityTextRefusals(text: string): string[] {
+  const out: string[] = [];
+  if (secretShapedLines(text).length > 0) out.push("secret-shaped text — the token shapes of repoContextFilter.ts (K5's list)");
+  let urls = 0;
+  for (const m of text.matchAll(SCHEME_URL_RE)) {
+    const host = urlHost(m[0]);
+    if (host === null || !(SECURITY_REPOSITORY_HOSTS as readonly string[]).includes(host)) urls++;
+  }
+  if (urls > 0) out.push(`${urls} full URL(s) to a host other than ${SECURITY_REPOSITORY_HOSTS.join(", ")} — a scenario names the code, never a live endpoint`);
+  let ips = 0;
+  const bare = text.replace(SCHEME_URL_RE, " ");
+  for (const m of bare.matchAll(IPV4_CANDIDATE_RE)) if (isIP(m[0]) === 4) ips++;
+  for (const m of bare.matchAll(IPV6_CANDIDATE_RE)) if (/[0-9A-Fa-f]/.test(m[0]) && isIP(m[0]) === 6) ips++;
+  if (ips > 0) out.push(`${ips} IP address(es) — a scenario names the code, never a host`);
+  return out;
 }
 
 /** K5's token-shape scan over one text file; an unreadable file (past the read cap) is K4's. */
