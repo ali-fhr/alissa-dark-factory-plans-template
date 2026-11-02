@@ -1586,6 +1586,18 @@ const SCHEME_URL_RE = /\b[a-z][a-z0-9+.-]{0,31}:\/\/[^\s<>"'`)\]]+/gi;
 const IPV4_CANDIDATE_RE = /(?<![0-9.])\d{1,3}(?:\.\d{1,3}){3}(?![0-9]|\.\d)/g;
 const IPV6_CANDIDATE_RE = /(?<![0-9A-Za-z:])[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?:%[0-9A-Za-z]+)?(?![0-9A-Za-z:])/g;
 
+/**
+ * Is a v6 candidate an address rather than a symbol path? `isIP` reads hex-only `::` paths a
+ * scenario plausibly names — `db::add`, `be::ef`, `a::b` — as v6, so K13 counts a candidate only
+ * when it carries a decimal digit (`::1`, `fe80::`, `2001:db8::1`) or three or more non-empty
+ * groups (`dead:beef:cafe::`). The residue it lets through — an all-letter address of at most two
+ * groups, like `fd::` or `dead::beef` — is a known false negative (README, K13).
+ */
+function isIpv6Address(candidate: string): boolean {
+  if (isIP(candidate) !== 6) return false;
+  return /[0-9]/.test(candidate) || candidate.split(":").filter((g) => g !== "").length >= 3;
+}
+
 /** The host of a scheme URL, lower case, or null when it has none. */
 function urlHost(raw: string): string | null {
   try {
@@ -1598,7 +1610,7 @@ function urlHost(raw: string): string | null {
 /**
  * Why a `scenario` or a `fix` may not be published as written (K13), never quoting the offending
  * text: a secret-shaped string (K5's token shapes), a full URL to a host other than the code host,
- * or an IP address (v4, or v6 as `node:net` reads it).
+ * or an IP address (v4, or v6 as `node:net` reads it, less hex-only `::` symbol paths like `db::add`).
  */
 export function securityTextRefusals(text: string): string[] {
   const out: string[] = [];
@@ -1612,7 +1624,7 @@ export function securityTextRefusals(text: string): string[] {
   let ips = 0;
   const bare = text.replace(SCHEME_URL_RE, " ");
   for (const m of bare.matchAll(IPV4_CANDIDATE_RE)) if (isIP(m[0]) === 4) ips++;
-  for (const m of bare.matchAll(IPV6_CANDIDATE_RE)) if (/[0-9A-Fa-f]/.test(m[0]) && isIP(m[0]) === 6) ips++;
+  for (const m of bare.matchAll(IPV6_CANDIDATE_RE)) if (isIpv6Address(m[0])) ips++;
   if (ips > 0) out.push(`${ips} IP address(es) — a scenario names the code, never a host`);
   return out;
 }

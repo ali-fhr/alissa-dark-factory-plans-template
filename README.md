@@ -446,7 +446,7 @@ never *nothing to lint* — under the K rules, numbered apart from §5.5's:
 | K10 | security shape | a `security` block that fails the schema (a field missing or off its list, a `scenario` over 1,200 characters or a `fix` over 800, a block in a file before v1.3); a `severity` more than one step from §5.1's table with no `calibration` reason | — |
 | K11 | security key | two questions in one file sharing a `security.key`; a key that is not `[a-z0-9.-]{1,80}` | — |
 | K12 | cited finding | a `security` block on a question that is not `answered` or `partial`, or whose `cites` hold no repo or evidence cite (a URL cite alone does not ground it) | — |
-| K13 | no secrets in scenario | a `scenario` or `fix` carrying a secret-shaped string (K5's token shapes), a full URL to a host other than `github.com`, or an IP address (v4 or v6) — named by kind and count, never quoted | — |
+| K13 | no secrets in scenario | a `scenario` or `fix` carrying a secret-shaped string (K5's token shapes), a full URL to a host other than `github.com`, or an IP address (v4 or v6; a v6 candidate counts only with a decimal digit or three or more non-empty groups, so hex-only `::` symbol paths like `db::add` pass — and so does an all-letter address of at most two groups, like `fd::`, a known false negative) — named by kind and count, never quoted | — |
 | K14 | security file | a `findings.md` with any `security` block whose frontmatter lacks `kind: security_review`, so the projection can gate it (§8) | — |
 
 ```sh

@@ -1159,6 +1159,12 @@ describe("findings v1.3 — the security block and K10–K14 (alissa-security-re
     assert.match(securityTextRefusals("reach 192.168.1.20 directly").join("\n"), /1 IP address/);
     assert.match(securityTextRefusals("or fe80::1ff:fe23:4567:890a on v6").join("\n"), /1 IP address/);
     assert.deepEqual(securityTextRefusals("version 1.2.3, std::move, a 12:30:45 timestamp, and 999.1.1.1"), []);
+    // Hex-only `::` symbol paths are code, not hosts (issue #21): `isIP` reads each as v6.
+    assert.deepEqual(securityTextRefusals("calls db::add without a tenant check, then be::ef and a::b"), []);
+    assert.deepEqual(securityTextRefusals("dead::beef and cafe::face are symbol paths here"), []);
+    for (const v6 of ["::1", "2001:db8::1", "fe80::", "dead:beef:cafe::", "2001:0db8:85a3:0000:0000:8a2e:0370:7334"]) {
+      assert.match(securityTextRefusals(`reach ${v6} directly`).join("\n"), /1 IP address/, v6);
+    }
     const fix = (await offline(base().replace("refuse a mismatch with 403.", "refuse a mismatch with 403 at 10.1.2.3."))).failures;
     assert.deepEqual(rulesOf(fix), ["K13"], said(fix));
     assert.match(said(fix), /question `q1`: `security\.fix` carries 1 IP address/);
