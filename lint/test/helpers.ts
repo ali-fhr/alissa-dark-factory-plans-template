@@ -55,6 +55,8 @@ export function kbWorld(): KbWorld {
   const discovery = { kind: "discovery", createdAt: KB_CREATED, reads: `example-org/service-b@${KB_SHA}` };
   const tasks: KbWorld["tasks"] = {};
   for (const n of [1234, 1301, 1302, 1303, 1304, 1305, 1307]) tasks[`TASK-${n}`] = { ...discovery };
+  // v1.3 (lane SR-2): K10–K14, one failing and one passing fixture per rule, each a discovery task of its own.
+  for (const n of [1310, 1311, 1312, 1313, 1314, 1320, 1321, 1322, 1323, 1324]) tasks[`TASK-${n}`] = { ...discovery };
   tasks["TASK-1306"] = { ...discovery, kind: "code" };
   tasks["TASK-2000"] = { kind: "design", createdAt: KB_CREATED };
   tasks["TASK-2001"] = { kind: "code", createdAt: KB_CREATED };

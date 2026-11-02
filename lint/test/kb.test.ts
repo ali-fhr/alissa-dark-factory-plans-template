@@ -17,7 +17,7 @@ import { after, before, describe, it } from "node:test";
 import { reportKb } from "../plan-lint.ts";
 import {
   KB_ARCHIVE_HOSTS, KB_DENY_PATTERNS, KB_TOKEN_SHAPE_SOURCES, type KRule, K_RULE_NAMES, discoveryReviewLine, findingsSchema, isDeniedPath, kRulesRan, lintKb, secretShapedLines,
-  svgRefusals, taskOfBranch,
+  securityTextRefusals, severitySteps, svgRefusals, tableSeverities, taskOfBranch,
 } from "../rules.ts";
 import { parseFrontmatter, splitFrontmatter } from "../markdown.ts";
 import { readKbDir } from "../source.ts";
@@ -33,10 +33,13 @@ after(async () => {
   await api.close();
 });
 
-/** One fixture per K rule, each failing exactly its rule; `kb-k8-archived` is K8's passing case. */
-const kbCases = caseNames().filter((n) => /^kb-k\d-/.test(n) && n !== "kb-k8-archived");
+/**
+ * One fixture per K rule, each failing exactly its rule; `kb-k8-archived` is K8's passing case, and
+ * `kb-k1<n>-ok-*` is each of K10–K14's (v1.3, lane SR-2).
+ */
+const kbCases = caseNames().filter((n) => /^kb-k\d+-/.test(n) && n !== "kb-k8-archived" && !/^kb-k\d+-ok-/.test(n));
 const ruleOf = (name: string): KRule => {
-  const m = /^kb-(k[1-8])-[a-z0-9-]+$/.exec(name);
+  const m = /^kb-(k(?:[1-8]|1[0-4]))-[a-z0-9-]+$/.exec(name);
   assert.ok(m, `fixture case \`${name}\` is named kb-k<n>-<what>`);
   return (m[1] as string).toUpperCase() as KRule;
 };
@@ -78,16 +81,16 @@ const prArgs = (pr: { repo: string; base: string; head: string }, extra: string[
 
 describe("knowledge-base fixtures (c2)", () => {
   it("has the golden findings, the assessment, one fixture per K rule and one per failing K8 verdict", () => {
-    assert.deepEqual(kbCases.map(ruleOf), ["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K8", "K8", "K8"]);
+    assert.deepEqual(kbCases.map(ruleOf), ["K1", "K10", "K11", "K12", "K13", "K14", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K8", "K8", "K8"]);
     assert.deepEqual(kbCases.filter((n) => n.startsWith("kb-k8-")), ["kb-k8-blocked", "kb-k8-gone", "kb-k8-refuted", "kb-k8-unavailable"]);
     for (const n of ["kb-golden", "kb-golden-web", "kb-assessment", "kb-k8-archived"]) assert.ok(caseNames().includes(n), n);
   });
 
   for (const name of ["kb-golden", "kb-golden-web"]) {
-    it(`${name} passes K1–K9`, async () => {
+    it(`${name} passes K1–K14`, async () => {
       const r = await lintCase(name);
       assert.deepEqual(r.failures, []);
-      assert.deepEqual(r.rulesRun, ["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9"]);
+      assert.deepEqual(r.rulesRun, ["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9", "K10", "K11", "K12", "K13", "K14"]);
       assert.equal(r.questionCount, 2);
     });
   }
@@ -124,6 +127,12 @@ describe("knowledge-base fixtures (c2)", () => {
     assert.match(await messages("kb-k8-refuted"), /^URL cite `https:\/\/docs\.example\.com\/limits` is refuted: the page answers, and neither it nor an archive holds the quote/);
     assert.match(await messages("kb-k8-gone"), /^URL cite `https:\/\/docs\.example\.com\/removed-page` is gone \(404 or 410\), and no archive holds the quote/);
     assert.match(await messages("kb-k8-blocked"), /^URL cite `https:\/\/docs\.example\.com\/members-only` is blocked — .*; supply an archive or another source/);
+    assert.match(await messages("kb-k10-security-shape"), /question `q1`: `severity: critical` is more than one step from §5\.1's table \(`cosmetic`, `reachable: yes` → `low`\) and carries no `calibration` reason/);
+    assert.match(await messages("kb-k11-security-key"), /questions `q1` and `q2` share the `security\.key` `service-b\.authz\.load-config`/);
+    assert.match(await messages("kb-k12-cited-finding"), /question `q1` carries a `security` block but no repo or evidence cite/);
+    assert.match(await messages("kb-k13-scenario-secrets"), /question `q1`: `security\.scenario` carries 1 full URL\(s\) to a host other than github\.com/);
+    assert.match(await messages("kb-k13-scenario-secrets"), /question `q1`: `security\.scenario` carries 1 IP address\(es\)/);
+    assert.match(await messages("kb-k14-security-file"), /2 question\(s\) carry a `security` block \(`q1`, `q2`\) but the frontmatter has no `kind: security_review`/);
     assert.match(await messages("kb-k8-unavailable"), /^plan-lint could not run: URL cite `https:\/\/docs\.example\.com\/flaky` is unavailable \(a 5xx or a timeout\)/);
   });
 
@@ -131,7 +140,7 @@ describe("knowledge-base fixtures (c2)", () => {
     for (const name of ["kb-golden", "kb-golden-web", "kb-k6-task", "kb-k7-cites", "kb-k8-refuted", "kb-k8-gone", "kb-k8-blocked", "kb-k8-unavailable", "kb-k8-archived"]) {
       const run = await runCli(["--kb", kbFixture(name), "--no-base", "--offline"]);
       assert.equal(run.status, 0, run.stdout + run.stderr);
-      assert.match(run.stdout, /knowledge-base mode — [12] question\(s\) — K1–K5, K9$/m);
+      assert.match(run.stdout, /knowledge-base mode — [12] question\(s\) — K1–K5, K9–K14$/m);
       assert.match(run.stdout, /K6–K8 not run \(offline\)/);
     }
   });
@@ -206,7 +215,7 @@ describe("--pr in the knowledge-base mode (c1, c3)", () => {
     const run = await runCli(prArgs(pr, ["--check-output", out]), cliEnv(api));
     assert.equal(run.status, 0, run.stdout + run.stderr);
     assert.doesNotMatch(run.stdout, /nothing to lint/);
-    assert.match(run.stdout, /^plan-lint: knowledge-base\/2026\/10\/14\/TASK-1234 — knowledge-base mode — 2 question\(s\) — K1–K9$/m);
+    assert.match(run.stdout, /^plan-lint: knowledge-base\/2026\/10\/14\/TASK-1234 — knowledge-base mode — 2 question\(s\) — K1–K14$/m);
     const check = JSON.parse(readFileSync(out, "utf8")) as { conclusion: string; title: string };
     assert.deepEqual(check, { ...check, conclusion: "success", title: "PASS — knowledge-base — knowledge-base/2026/10/14/TASK-1234" });
   });
@@ -754,19 +763,19 @@ describe("evidence/ — K1 types, K4 caps, K5 scan, K9 cites (EV-1)", () => {
     assert.ok(f.some((x) => x.file === file && re.test(x.message)), JSON.stringify(f, null, 2));
   };
 
-  it("c1: the golden finding — a cited png and csv — passes K1–K9, through --kb and --pr", async () => {
+  it("c1: the golden finding — a cited png and csv — passes K1–K14, through --kb and --pr", async () => {
     const r = await lintCase("kb-evidence");
     assert.deepEqual(r.failures, []);
-    assert.deepEqual(r.rulesRun, ["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9"]);
+    assert.deepEqual(r.rulesRun, ["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9", "K10", "K11", "K12", "K13", "K14"]);
     const run = await runCli(["--kb", kbFixture("kb-evidence"), "--no-base"], cliEnv(api));
     assert.equal(run.status, 0, run.stdout + run.stderr);
-    assert.match(run.stdout, /K1–K9$/m);
+    assert.match(run.stdout, /K1–K14$/m);
     const pr = await runCli(prArgs(kbPr("kb-evidence")), cliEnv(api));
     assert.equal(pr.status, 0, pr.stdout + pr.stderr);
-    assert.match(pr.stdout, /^plan-lint: knowledge-base\/2026\/10\/20\/TASK-1300 — knowledge-base mode — 2 question\(s\) — K1–K9$/m);
+    assert.match(pr.stdout, /^plan-lint: knowledge-base\/2026\/10\/20\/TASK-1300 — knowledge-base mode — 2 question\(s\) — K1–K14$/m);
     const off = await runCli(["--kb", kbFixture("kb-evidence"), "--no-base", "--offline"]);
     assert.equal(off.status, 0, off.stdout);
-    assert.match(off.stdout, /— K1–K5, K9$/m);
+    assert.match(off.stdout, /— K1–K5, K9–K14$/m);
   });
 
   it("c2: K9 refuses an uncited evidence file, naming it", async () => {
@@ -1023,8 +1032,155 @@ describe("evidence/ — K1 types, K4 caps, K5 scan, K9 cites (EV-1)", () => {
   it("the report names the rules a run made, with gaps", () => {
     assert.equal(kRulesRan(["K1", "K2", "K3", "K4", "K5", "K9"]), "K1–K5, K9");
     assert.equal(kRulesRan(["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9"]), "K1–K9");
+    assert.equal(kRulesRan(["K1", "K2", "K3", "K4", "K5", "K9", "K10", "K11", "K12", "K13", "K14"]), "K1–K5, K9–K14");
     assert.equal(kRulesRan(["K1", "K5"]), "K1, K5");
     assert.equal(kRulesRan(["K1", "K4", "K5"]), "K1, K4, K5");
+  });
+});
+
+describe("findings v1.3 — the security block and K10–K14 (alissa-security-review §5.1, §5.2, lane SR-2)", () => {
+  const okCases = ["kb-k10-ok-calibrated", "kb-k11-ok-distinct-keys", "kb-k12-ok-partial", "kb-k13-ok-code-link", "kb-k14-ok-security-review"];
+  const base = () => readFileSync(join(kbFixture("kb-k14-ok-security-review"), "findings.md"), "utf8");
+  const variantDir = (text: string): string => {
+    const dir = join(tempDir("kb-v13"), "knowledge-base", "2026", "10", "14", "TASK-1324");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "findings.md"), text);
+    return dir;
+  };
+  const offline = async (text: string) => lintKb(readKbDir(variantDir(text), null), { online: false });
+  const said = (f: Array<{ rule: string; message: string }>) => f.map((x) => `${x.rule} ${x.message}`).join("\n");
+  const rulesOf = (f: Array<{ rule: string }>) => [...new Set(f.map((x) => x.rule))];
+
+  it("has a passing fixture for each of K10–K14, and each passes K1–K14 online and offline", async () => {
+    for (const rule of ["k10", "k11", "k12", "k13", "k14"]) assert.ok(okCases.some((n) => n.startsWith(`kb-${rule}-ok-`)), rule);
+    for (const name of okCases) {
+      assert.ok(caseNames().includes(name), name);
+      const r = await lintCase(name);
+      assert.deepEqual(r.failures, [], `${name}: ${said(r.failures)}`);
+      assert.deepEqual(r.rulesRun, ["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9", "K10", "K11", "K12", "K13", "K14"]);
+      const run = await runCli(["--kb", kbFixture(name), "--no-base", "--offline"]);
+      assert.equal(run.status, 0, run.stdout + run.stderr);
+      assert.match(run.stdout, /— K1–K5, K9–K14$/m);
+    }
+  });
+
+  it("the schema reads v1.3 with the block; every earlier v1.x fixture still validates as written", () => {
+    const validate = findingsSchema();
+    for (const name of okCases) assert.ok(validate(yamlOf(readFileSync(join(kbFixture(name), "findings.md"), "utf8"))), `${name}: ${JSON.stringify(validate.errors)}`);
+    for (const name of ["kb-golden", "kb-golden-web", "kb-evidence", "kb-k8-archived"]) {
+      const fm = yamlOf(readFileSync(join(kbFixture(name), "findings.md"), "utf8")) as { schema: string };
+      assert.notEqual(fm.schema, "alissa-findings/v1.3", name);
+      assert.ok(validate(fm), `${name}: ${JSON.stringify(validate.errors)}`);
+    }
+    // A v1.3 file needs neither: the block and `kind` are optional.
+    const plain = yamlOf(readFileSync(join(kbFixture("kb-golden"), "findings.md"), "utf8")) as Record<string, unknown>;
+    assert.ok(validate({ ...plain, schema: "alissa-findings/v1.3" }), JSON.stringify(validate.errors));
+  });
+
+  it("K10: a security block or a `kind` before v1.3 is refused — the block by K10, `kind` by K2", async () => {
+    const v12 = base().replace("schema: alissa-findings/v1.3\nkind: security_review\n", "schema: alissa-findings/v1.2\n");
+    const f = (await offline(v12)).failures;
+    assert.match(said(f), /K10 question `q1` carries a `security` block — it needs `schema: alissa-findings\/v1\.3`/);
+    const kind = (await offline(base().replace("schema: alissa-findings/v1.3", "schema: alissa-findings/v1.2").replace(/ {4}security:\n(?: {6}.*\n| {8}.*\n)+/g, ""))).failures;
+    assert.deepEqual(rulesOf(kind), ["K2"], said(kind));
+    assert.match(said(kind), /^K2 frontmatter carries `kind` — it needs `schema: alissa-findings\/v1\.3`/m);
+  });
+
+  it("K10: a block that fails the schema — a severity, category, reachability or crossRun off the list, a missing field, an oversized scenario — is K10, not K2", async () => {
+    for (const [from, to, why] of [
+      ["severity: high", "severity: severe", /K10 question `q1`: frontmatter \/questions\/0\/security\/severity must be equal to one of the allowed values: critical, high, medium, low/],
+      ["category: authz", "category: xss", /\/security\/category must be equal to one of the allowed values: authz, money, injection, storage, secrets, supply_chain, container/],
+      ["reachable: yes", "reachable: maybe", /\/security\/reachable must be equal to one of the allowed values: yes, no, unknown/],
+      ["crossRun: new", "crossRun: reopened", /\/security\/crossRun must be equal to one of the allowed values: new, still_open, fixed, regressed/],
+      ["      crossRun: new\n", "", /\/security must have required property 'crossRun'/],
+      ["cwe: CWE-285", "cwe: CWE285", /\/security\/cwe must match pattern/],
+      ["      cwe: CWE-285\n", "      cwe: CWE-285\n      owner: someone\n", /\/security must NOT have additional properties/],
+    ] as const) {
+      const f = (await offline(base().replace(from, to))).failures;
+      assert.deepEqual(rulesOf(f), ["K10"], `${to}: ${said(f)}`);
+      assert.match(said(f), why);
+    }
+    const long = (await offline(base().replace(/(scenario: >-\n {8})A signed-in/, `$1${"x".repeat(1200)} A signed-in`))).failures;
+    assert.deepEqual(rulesOf(long), ["K10"], said(long));
+    assert.match(said(long), /\/security\/scenario must NOT have more than 1200 characters/);
+  });
+
+  it("K10: severity is held to §5.1's table — one step off passes, more needs a calibration reason", async () => {
+    // `security`, reachable: critical or high; one step below high is medium — passes.
+    assert.deepEqual((await offline(base().replace("severity: high", "severity: medium"))).failures, []);
+    // Two steps: low for a reachable `security` finding.
+    const low = (await offline(base().replace("severity: high", "severity: low"))).failures;
+    assert.deepEqual(rulesOf(low), ["K10"], said(low));
+    assert.match(said(low), /`severity: low` is more than one step from §5\.1's table \(`security`, `reachable: yes` → `critical` or `high`\)/);
+    // Unreachable is low for every consequence: critical for reachable: no is three steps.
+    const unreachable = (await offline(base().replace("reachable: yes", "reachable: no").replace("severity: high", "severity: critical"))).failures;
+    assert.match(said(unreachable), /`severity: critical` is more than one step from §5\.1's table \(`security`, `reachable: no` → `low`\)/);
+    // `unknown` reads as reachable.
+    assert.deepEqual((await offline(base().replace("reachable: yes", "reachable: unknown"))).failures, []);
+    // A calibration reason admits the move.
+    assert.deepEqual((await offline(base().replace("severity: high", "severity: low").replace("      cwe: CWE-285\n", "      cwe: CWE-285\n      calibration: Verify found the endpoint is unreachable outside the admin VPN.\n"))).failures, []);
+    assert.deepEqual(tableSeverities("money", "yes"), ["critical"]);
+    assert.deepEqual(tableSeverities("contract", "unknown"), ["medium"]);
+    assert.deepEqual(tableSeverities("hypothetical", "yes"), ["low"]);
+    assert.equal(severitySteps("low", "data", "yes"), 3);
+    assert.equal(severitySteps("medium", "security", "yes"), 1);
+  });
+
+  it("K11: a key is `[a-z0-9.-]{1,80}` and unique in the file", async () => {
+    for (const bad of ["Service-B.authz", "service_b.authz", "x".repeat(81)]) {
+      const f = (await offline(base().replace("key: service-b.authz.load-config", `key: ${bad}`))).failures;
+      assert.deepEqual(rulesOf(f), ["K11"], `${bad}: ${said(f)}`);
+      assert.match(said(f), /is not `\[a-z0-9\.-\]\{1,80\}`/);
+    }
+    assert.deepEqual((await offline(base().replace("key: service-b.authz.load-config", `key: ${"x".repeat(80)}`))).failures, []);
+  });
+
+  it("K12: a block on an unanswerable question is refused; a URL cite alone does not ground it; an evidence cite does", async () => {
+    const unanswerable = (await offline(base().replace("status: answered", "status: unanswerable").replace("    confidence: high\n", "    confidence: high\n    reason: The tenant check lives in a gateway outside the repository.\n"))).failures;
+    assert.deepEqual(rulesOf(unanswerable), ["K12"], said(unanswerable));
+    assert.match(said(unanswerable), /question `q1` is `unanswerable` but carries a `security` block — a finding is `answered` or `partial`/);
+    const load = /      - \{ repo: example-org\/service-b, path: src\/config\/load\.ts[^\n]*\n/;
+    const url = "      - { kind: url, url: \"https://docs.example.com/tenancy\", retrievedAt: \"2026-10-14T10:00:00Z\", quote: \"Every request carries the tenant id it acts for.\" }\n";
+    const urlOnly = (await offline(base().replace(load, url))).failures;
+    assert.deepEqual(rulesOf(urlOnly), ["K12"], said(urlOnly));
+    assert.match(said(urlOnly), /question `q1` carries a `security` block but no repo or evidence cite/);
+    const dir = variantDir(base().replace(load, "      - { kind: evidence, file: npm-audit-service-b.json }\n"));
+    mkdirSync(join(dir, "evidence"));
+    writeFileSync(join(dir, "evidence", "npm-audit-service-b.json"), "{}\n");
+    assert.deepEqual((await lintKb(readKbDir(dir, null), { online: false })).failures, []);
+  });
+
+  it("K13: a secret-shaped string, a URL off the code host or an IP address in a scenario or a fix — named, never quoted", async () => {
+    assert.deepEqual(securityTextRefusals("loadConfig() in src/config/load.ts trusts the request's tenant id."), []);
+    assert.deepEqual(securityTextRefusals("See https://github.com/example-org/service-b/blob/main/src/config/load.ts#L12."), []);
+    assert.match(securityTextRefusals("The key ghp_abcdefghijklmnop1234 is committed.").join("\n"), /secret-shaped text/);
+    assert.match(securityTextRefusals("POST to https://api.example.com/refund").join("\n"), /1 full URL\(s\) to a host other than github\.com/);
+    assert.match(securityTextRefusals("then http://github.com.evil.example/x").join("\n"), /1 full URL/);
+    assert.match(securityTextRefusals("reach 192.168.1.20 directly").join("\n"), /1 IP address/);
+    assert.match(securityTextRefusals("or fe80::1ff:fe23:4567:890a on v6").join("\n"), /1 IP address/);
+    assert.deepEqual(securityTextRefusals("version 1.2.3, std::move, a 12:30:45 timestamp, and 999.1.1.1"), []);
+    const fix = (await offline(base().replace("refuse a mismatch with 403.", "refuse a mismatch with 403 at 10.1.2.3."))).failures;
+    assert.deepEqual(rulesOf(fix), ["K13"], said(fix));
+    assert.match(said(fix), /question `q1`: `security\.fix` carries 1 IP address/);
+    assert.doesNotMatch(said(fix), /10\.1\.2\.3/);
+  });
+
+  it("K14: kind: security_review is required beside any block, and a file with no block may carry it", async () => {
+    const noBlocks = base().replace(/ {4}security:\n(?: {6}.*\n| {8}.*\n)+/g, "");
+    assert.doesNotMatch(noBlocks, /security:/);
+    assert.deepEqual((await offline(noBlocks)).failures, []);
+    assert.deepEqual((await offline(noBlocks.replace("kind: security_review\n", ""))).failures, []);
+  });
+
+  it("the review line treats a critical or high block as impact high, and medium or low as not", async () => {
+    const high = await offline(base());
+    assert.deepEqual(high.review, { level: "light", reasons: ["high impact: q1"] });
+    const critical = await offline(base().replace("severity: high", "severity: critical"));
+    assert.deepEqual(critical.review, { level: "light", reasons: ["high impact: q1"] });
+    const medium = await offline(base().replace("severity: high", "severity: medium"));
+    assert.deepEqual(medium.review, { level: "none", reasons: [] });
+    const run = await runCli(["--kb", kbFixture("kb-k14-ok-security-review"), "--no-base", "--offline"]);
+    assert.match(run.stdout, /^Discovery-Review: light — high impact: q1$/m);
   });
 });
 

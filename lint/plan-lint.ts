@@ -11,10 +11,12 @@
 // https://api.alissa.app), and rule 5b reads each task's repository on GitHub (GITHUB_TOKEN or
 // GH_TOKEN when set; GITHUB_API_URL overrides https://api.github.com). --offline runs rules 1–9 only. --summary-file <path> appends a Markdown
 // report; --check-output <path> writes { conclusion, title, summary } for a check run.
-// A pull request that changes any knowledge-base/** file is linted in the knowledge-base mode, K1–K9
-// (design alissa-build-discovery §3.4): K1–K5 and K9 offline, K6 reads the task, K7 posts the repo cites to
-// Studio's verify route and K8 the URL cites to its url-cites route; --kb runs the same rules over a
-// local directory. A finding's report ends with its `Discovery-Review: none | light — <reasons>` line. A pull request that changes
+// A pull request that changes any knowledge-base/** file is linted in the knowledge-base mode, K1–K14
+// (design alissa-build-discovery §3.4; K10–K14, a question's `security` block, alissa-security-review
+// §5.2): K1–K5 and K9–K14 offline, K6 reads the task, K7 posts the repo cites to Studio's verify route
+// and K8 the URL cites to its url-cites route; --kb runs the same rules over a local directory. A
+// finding's report ends with its `Discovery-Review: none | light — <reasons>` line, where a `critical`
+// or `high` security block counts as impact `high`. A pull request that changes
 // any integration-check/** file is linted in the integration-check mode, I1–I9 (design
 // alissa-build-integration-check §3.5): I1, I2 and I4–I8 offline, I3 and I9 read Alissa; --ic runs
 // the same rules over a local run directory.
@@ -289,7 +291,7 @@ function readerFor(offline: boolean, env: NodeJS.ProcessEnv): Parameters<typeof 
 function kbOptionsFor(offline: boolean, env: NodeJS.ProcessEnv, prTask: string | null): KbLintOptions {
   if (offline) return { online: false, prTask };
   const token = env.ALISSA_API_TOKEN;
-  if (!token) throw new UsageError("K6–K8 need ALISSA_API_TOKEN; pass --offline to run K1–K5 and K9 only");
+  if (!token) throw new UsageError("K6–K8 need ALISSA_API_TOKEN; pass --offline to run K1–K5 and K9–K14 only");
   const base = env.ALISSA_BASE || DEFAULT_ALISSA_BASE;
   // K8's route fetches every page (and its archive) behind a 10 s per-fetch guard before it answers.
   return { online: true, reader: httpReader({ base, token }), verifier: httpPoster({ base, token, timeoutMs: KB_VERIFY_TIMEOUT_MS }), prTask };

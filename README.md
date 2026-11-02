@@ -332,7 +332,7 @@ A discovery task (design `alissa-build-discovery.md` §2–§4) answers its ques
 repository, read at a pinned SHA, and writes exactly one new directory here:
 `knowledge-base/<YYYY>/<MM>/<DD>/TASK-<n>/findings.md`, the date being the task's creation day
 (UTC), with an optional `evidence/` folder beside it (below). Its frontmatter validates against
-`schema/findings.v1.json` (`schema: alissa-findings/v1`, `alissa-findings/v1.1` or `/v1.2`, `task`, `project`, `reads` — each repository at its 40-hex SHA —
+`schema/findings.v1.json` (`schema: alissa-findings/v1`, `alissa-findings/v1.1`, `/v1.2` or `/v1.3`, `task`, `project`, `reads` — each repository at its 40-hex SHA —
 `topics`, `questions` with their `status`, `confidence`, `answer` or `reason`, `cites` and
 `unblocks`, then optional `risks` and `suggestedTasks`); its body is a `## Summary` and one section
 per question.
@@ -377,6 +377,54 @@ carry artifacts — screenshots, diagrams, small data — the way an integration
 
 `fixtures/kb-evidence` is the golden finding with a cited png and csv.
 
+**Security — findings v1.3** (design `alissa-security-review.md` §5.1, §5.2 in `ali-fhr/studio.alissa.app`,
+lane SR-2): a security review's finding carries, per question, one optional `security` block, and
+the file says what it is with `kind: security_review`. Every v1, v1.1 and v1.2 file validates as
+written; neither the block nor `kind` is admitted before `schema: alissa-findings/v1.3`.
+
+```yaml
+schema: alissa-findings/v1.3
+kind: security_review                      # required beside any security block (K14)
+questions:
+  - id: q3
+    text: …
+    status: answered                       # answered | partial (K12)
+    cites: [ … ]                           # at least one repo or evidence cite (K12)
+    security:
+      key: shop-api.authz.order-refund     # stable across runs, [a-z0-9.-]{1,80}, unique in the file (K11)
+      severity: high                       # critical | high | medium | low
+      category: authz                      # authz | money | injection | storage | secrets | supply_chain | container
+      consequence: money                   # money | data | security | correctness | leak | alarm | stall | contract
+                                           #   | cosmetic | redundant-test | hypothetical
+      reachable: yes                       # yes | no | unknown
+      scenario: >-                         # ≤ 1,200 characters: who, from where, gets what
+        …
+      fix: >-                              # ≤ 800 characters
+        …
+      crossRun: new                        # new | still_open | fixed | regressed
+      cwe: CWE-285                         # optional
+      calibration: …                       # optional, one line ≤ 300: why severity departs from the table
+```
+
+**Severity is consequence × reachability** (§5.1), on the values of the code-review severity taxonomy:
+
+| Consequence | `reachable: yes` or `unknown` | `reachable: no` |
+|---|---|---|
+| `money`, `data`, `security` with no precondition | `critical` | `low` |
+| `security` behind an authenticated user | `high` | `low` |
+| `correctness`, `leak`, `alarm`, `stall`, `contract` | `medium` | `low` |
+| `cosmetic`, `redundant-test`, `hypothetical` | `low` | `low` |
+
+The block does not say whether a `security` consequence sits behind a sign-in, so K10 reads both of
+its rows: `critical` or `high`. A severity one step from the table passes; further needs a
+`calibration` reason (the Verify milestone's stated reason, shown beside the severity in the report).
+Studio's projection keeps `severity`, `category`, `key` and `crossRun`, and reads `scenario` and
+`fix` from this repository on demand (§8). A `critical` or `high` block puts its question at impact
+`high` on the review line below.
+
+The fixtures `kb-k10-…` to `kb-k14-…` fail exactly their rule; `kb-k1<n>-ok-…` is each rule's
+passing case.
+
 The knowledge base is
 **append-only**: a merged finding is never edited, and a newer one names it in `reverifies`. The
 index of findings is a Studio projection, never a committed file.
@@ -395,10 +443,15 @@ never *nothing to lint* — under the K rules, numbered apart from §5.5's:
 | K7 | cites resolve | a cited path that does not exist at its `reads` SHA, whose blob differs from `blob`, or whose line range runs past the file's end — asked of Studio, never of GitHub | Studio |
 | K8 | external cites hold | a URL cite whose page is `refuted` (it answers, and neither it nor the archive holds the quote), `gone` (404 or 410, and no archive holds it) or `blocked` (401, 403, 429, a paywall, or a URL Studio's fetch guard refuses, and no archive); `unavailable` (a 5xx or a timeout) is *plan-lint could not run*. `archived` — only the archive holds the quote — passes, and the projection marks the cite stale. Asked of Studio, never fetched from the runner | Studio |
 | K9 | evidence cited | an `evidence/` file that `findings.md` never cites; an `evidence:<file>` cite — inline or `{ kind: evidence, file }` — naming a file that is not in the folder | — |
+| K10 | security shape | a `security` block that fails the schema (a field missing or off its list, a `scenario` over 1,200 characters or a `fix` over 800, a block in a file before v1.3); a `severity` more than one step from §5.1's table with no `calibration` reason | — |
+| K11 | security key | two questions in one file sharing a `security.key`; a key that is not `[a-z0-9.-]{1,80}` | — |
+| K12 | cited finding | a `security` block on a question that is not `answered` or `partial`, or whose `cites` hold no repo or evidence cite (a URL cite alone does not ground it) | — |
+| K13 | no secrets in scenario | a `scenario` or `fix` carrying a secret-shaped string (K5's token shapes), a full URL to a host other than `github.com`, or an IP address (v4 or v6) — named by kind and count, never quoted | — |
+| K14 | security file | a `findings.md` with any `security` block whose frontmatter lacks `kind: security_review`, so the projection can gate it (§8) | — |
 
 ```sh
-npm run plan-lint -- --kb knowledge-base/2026/10/14/TASK-1234             # K1–K9 (K6–K8 need ALISSA_API_TOKEN)
-npm run plan-lint -- --kb knowledge-base/2026/10/14/TASK-1234 --offline   # K1–K5 and K9 only, no network
+npm run plan-lint -- --kb knowledge-base/2026/10/14/TASK-1234             # K1–K14 (K6–K8 need ALISSA_API_TOKEN)
+npm run plan-lint -- --kb knowledge-base/2026/10/14/TASK-1234 --offline   # K1–K5 and K9–K14 only, no network
 npm run plan-lint -- --kb knowledge-base/assessments/shop-2026-10-14.md --task TASK-2000
 ```
 
@@ -422,7 +475,8 @@ npm run plan-lint -- --kb knowledge-base/assessments/shop-2026-10-14.md --task T
   output — ends with one machine-read line: `Discovery-Review: none` when every cite is a repo
   cite and no question's `unblocks` carries `impact: high`, otherwise `Discovery-Review: light —
   <reasons>`, the reasons being `external cites: <n>` and `high impact: <question ids>`, joined by
-  `; ` (design §3.6). devloop, revloop and orcloop read this line, never their own reading of the
+  `; ` (design §3.6). A question whose `security` block is `critical` or `high` counts as impact
+  `high` (alissa-security-review §5.2), so a serious security finding always gets the light round. devloop, revloop and orcloop read this line, never their own reading of the
   file. Findings too malformed to classify (K2) carry no line; a reader takes a missing line as
   `light`.
 - **Fail closed.** When the route is down, answers an error or an unexpected shape — or Alissa
@@ -437,7 +491,8 @@ npm run plan-lint -- --kb knowledge-base/assessments/shop-2026-10-14.md --task T
   readiness check `plans-repo-kb-lint` reads it (design §12 Q2): a plans repository whose stamp
   lacks `modes: … knowledge-base` gets no discovery tasks planned for it, and one whose stamp lacks
   `findings-schema: alissa-findings/v1.1` and `K8` in `kb-rules` gets no URL cites (lane DS-11); one
-  whose stamp lacks `alissa-findings/v1.2` and `K9` lints no `evidence/` folder.
+  whose stamp lacks `alissa-findings/v1.2` and `K9` lints no `evidence/` folder; one whose stamp
+  lacks `alissa-findings/v1.3` and `K10`–`K14` lints no `security` block.
   `lint/test/kb.test.ts` keeps the stamp in step with the schemas and the rules.
 - **Rollout.** The template changes new plans repositories only; the provisioner never overwrites
   an adopted one. Until an existing repository is upgraded — by an ordinary `TASK-` lane in that
