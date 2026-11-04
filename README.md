@@ -525,7 +525,7 @@ npm run plan-lint -- --kb knowledge-base/assessments/shop-2026-10-14.md --task T
   `{ files }` and answers 400 to `{ passages }`. Until Studio changes, every `kind: doc_check` finding
   linted online exits `3`, and K17's message says the route may not read `passages` yet. That is
   fail-closed, never a false pass. `--offline` skips K17, so K15, K16 and K18 still run. The Studio work
-  is tracked by TASK-559693681 (from the review of PR #24). This repository cannot carry it.
+  is tracked by TASK-359230954 (from the review of PR #24). This repository cannot carry it.
 - **K8 goes through Studio's url-cites route**, which fetches each page behind DS-16's guarded fetch
   (https only, every resolved address checked, redirects re-checked, no credentials), so the trusted
   job, which holds the lint token, never fetches a URL a PR author chose. The linter posts every
