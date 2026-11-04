@@ -673,7 +673,7 @@ function sortFailures(f: Failure[]): Failure[] {
   return f.map((x, i) => ({ x, i })).sort((a, b) => ruleRank(a.x.rule) - ruleRank(b.x.rule) || a.i - b.i).map(({ x }) => x);
 }
 
-// ── The knowledge-base mode: K1–K9 (design alissa-build-discovery §3.4); K10–K14 below (SR-2) ─────
+// ── The knowledge-base mode: K1–K9 (design alissa-build-discovery §3.4); K10–K14 (SR-2) and K15–K18 (DOC-3) below
 // A pull request that changes any `knowledge-base/**` file is linted under these rules, numbered
 // apart from §5.5's. K1–K5 need no network; K6 reads the task with the lint token, K7 asks
 // Studio's verify route whether each repo cite holds at its pinned SHA, and K8 (v1.1) asks Studio's
@@ -684,7 +684,8 @@ function sortFailures(f: Failure[]): Failure[] {
 // (operator decision 2026-10-20): K1 types it, K4 caps it, K5 scans its text and K9 — offline, like
 // K1–K5 — holds every file and every `evidence:<file>` cite to each other.
 
-export type KRule = "K1" | "K2" | "K3" | "K4" | "K5" | "K6" | "K7" | "K8" | "K9" | "K10" | "K11" | "K12" | "K13" | "K14";
+export type KRule = "K1" | "K2" | "K3" | "K4" | "K5" | "K6" | "K7" | "K8" | "K9" | "K10" | "K11" | "K12" | "K13" | "K14"
+  | "K15" | "K16" | "K17" | "K18";
 
 export const K_RULE_NAMES: Readonly<Record<KRule, string>> = {
   K1: "layout and immutability",
@@ -701,6 +702,10 @@ export const K_RULE_NAMES: Readonly<Record<KRule, string>> = {
   K12: "cited finding",
   K13: "no secrets in scenario",
   K14: "security file",
+  K15: "doc shape",
+  K16: "doc key",
+  K17: "verbatim passage",
+  K18: "doc file",
 };
 
 /** The rules a run made, as the report names them: `K1–K5, K9`, `K1–K9`, `K1, K5`. */
@@ -958,6 +963,8 @@ export const FINDINGS_SCHEMA_V11 = "alissa-findings/v1.1";
 export const FINDINGS_SCHEMA_V12 = "alissa-findings/v1.2";
 /** v1.3 (design alissa-security-review §5.1, lane SR-2): a question's `security` block and the file's `kind: security_review`. */
 export const FINDINGS_SCHEMA_V13 = "alissa-findings/v1.3";
+/** v1.4 (design alissa-documentation-check §5.1, lane DOC-3): a question's `doc` block and the file's `kind: doc_check`. */
+export const FINDINGS_SCHEMA_V14 = "alissa-findings/v1.4";
 
 /** Studio's cite check (lane DS-3), on the lint token. */
 export const VERIFY_ROUTE = "/v1/factory/repo-files/verify";
@@ -1193,7 +1200,7 @@ const CITE_PATH_RE = /^\/(questions|risks)\/(\d+)\/cites\/(\d+)/;
 function kbSchemaErrors(errors: ErrorObject[], fm: unknown): Array<ErrorObject | string> {
   const doc = isRecord(fm) ? fm : {};
   const v1 = doc.schema === FINDINGS_SCHEMA_V1;
-  const v12 = doc.schema === FINDINGS_SCHEMA_V12 || doc.schema === FINDINGS_SCHEMA_V13;
+  const v12 = doc.schema === FINDINGS_SCHEMA_V12 || doc.schema === FINDINGS_SCHEMA_V13 || doc.schema === FINDINGS_SCHEMA_V14;
   const out: Array<ErrorObject | string> = [];
   const said = new Set<string>();
   const say = (x: ErrorObject | string): void => {
@@ -1211,7 +1218,11 @@ function kbSchemaErrors(errors: ErrorObject[], fm: unknown): Array<ErrorObject |
       continue;
     }
     if (e.keyword === "false schema" && e.instancePath === "/kind") {
-      say(`frontmatter carries \`kind\` — it needs \`schema: ${FINDINGS_SCHEMA_V13}\` (alissa-security-review §5.1)`);
+      say(`frontmatter carries \`kind\` — it needs \`schema: ${FINDINGS_SCHEMA_V13}\` (alissa-security-review §5.1)${doc.kind === "doc_check" ? ` or, for \`doc_check\`, \`${FINDINGS_SCHEMA_V14}\`` : ""}`);
+      continue;
+    }
+    if (e.keyword === "not" && e.instancePath === "/kind") {
+      say(`frontmatter carries \`kind: doc_check\` — it needs \`schema: ${FINDINGS_SCHEMA_V14}\` (alissa-documentation-check §5.1)`);
       continue;
     }
     const m = CITE_PATH_RE.exec(e.instancePath);
@@ -1338,6 +1349,7 @@ export async function lintKb(src: KbSource, opts: KbLintOptions): Promise<KbLint
         for (const e of kbSchemaErrors(validate.errors ?? [], parsed.value)) {
           if (typeof e === "string") k2fail(e);
           else if (SECURITY_PATH_RE.test(e.instancePath)) securitySchemaError(e, parsed.value, fail);
+          else if (DOC_PATH_RE.test(e.instancePath)) docSchemaError(e, parsed.value, fail);
           else if (isKbSizeError(e)) fail("K4", `frontmatter ${ajvMessage(e)} (§2.3)`, FINDINGS_FILE);
           else if (e.keyword === "type" && /\/(sha|blob|lines)$/.test(e.instancePath)) k2fail(`frontmatter ${ajvMessage(e)} — YAML reads an all-digit value as a number; quote it`);
           else k2fail(`frontmatter ${ajvMessage(e)}`);
@@ -1454,29 +1466,37 @@ export async function lintKb(src: KbSource, opts: KbLintOptions): Promise<KbLint
   // K10–K14 — the security block (v1.3, design alissa-security-review §5.2). A block the schema
   // refused was reported above (K10, or K11 for its key); the rules below read the blocks that parsed.
   if (fm) kbSecurity(fm, questions, fail);
+  // K15, K16 and K18 — the doc block (v1.4, design alissa-documentation-check §5.2), offline like
+  // K10–K14; K17, its verbatim passage, goes through the verify route with K7 below.
+  if (fm) kbDoc(fm, questions, fail);
 
   // §3.6 — the review line: `light` for any URL cite or any `high`-impact question, else `none`.
-  // A `critical` or `high` security block counts as impact `high` (alissa-security-review §5.2).
+  // A `critical` or `high` security block counts as impact `high` (alissa-security-review §5.2), and so
+  // does a `wrong` doc verdict whose fix is the code's (alissa-documentation-check §5.2).
   if (fm) {
     const high = questions.filter((q) =>
-      ((q.unblocks as Array<{ impact?: unknown }> | undefined) ?? []).some((u) => u.impact === "high") || isHighSecurity(q.security)).map((q) => q.id as string);
+      ((q.unblocks as Array<{ impact?: unknown }> | undefined) ?? []).some((u) => u.impact === "high") || isHighSecurity(q.security) || isHighDoc(q.doc))
+      .map((q) => q.id as string);
     const reasons = [...(urlCites.length > 0 ? [`external cites: ${urlCites.length}`] : []), ...(high.length > 0 ? [`high impact: ${high.join(", ")}`] : [])];
     review = { level: reasons.length > 0 ? "light" : "none", reasons };
   } else notes.push("Discovery-Review: not classified — the frontmatter is not valid (K2); a reader treats a missing line as light");
 
   if (!opts.online) {
-    notes.push("K6–K8 not run (offline)");
-    return result(["K1", "K2", "K3", "K4", "K5", "K9", ...SECURITY_RULES]);
+    notes.push("K6–K8 and K17 not run (offline)");
+    return result(["K1", "K2", "K3", "K4", "K5", "K9", ...SECURITY_RULES, "K15", "K16", "K18"]);
   }
+  const online: KRule[] = ["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9", ...SECURITY_RULES, ...DOC_RULES];
   if (!fm) {
-    notes.push("K6–K8 not evaluated: the frontmatter is not valid (K2)");
-    return result(["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9", ...SECURITY_RULES]);
+    notes.push("K6–K8 and K17 not evaluated: the frontmatter is not valid (K2)");
+    return result(online);
   }
+  const reads = fm.reads as Array<{ repo: string; sha: string }>;
   await kbTask(fm, src, urlCites.length, opts.reader, fail);
-  await kbCites(repoCites, fm.reads as Array<{ repo: string; sha: string }>, opts.verifier, fail, notes);
+  await kbCites(repoCites, reads, opts.verifier, fail, notes);
   if (urlCites.length > KB_LIMITS.urlCitesMax) notes.push(`K8 not run: ${urlCites.length} URL cites is past the route's ${KB_LIMITS.urlCitesMax} (K4)`);
   else await kbUrlCites(urlCites, opts.verifier, fail, notes);
-  return result(["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9", ...SECURITY_RULES]);
+  await kbPassages(questions, reads, opts.verifier, fail, notes);
+  return result(online);
 }
 
 // ── K10–K14: the security block (design alissa-security-review §5.1, §5.2, lane SR-2) ─────────────
@@ -1580,6 +1600,145 @@ function kbSecurity(fm: Record<string, unknown>, questions: Array<Record<string,
   if (blocks.length > 0 && fm.kind !== "security_review") {
     fail("K14", `${blocks.length} question(s) carry a \`security\` block (${blocks.map((b) => `\`${b.id}\``).join(", ")}) but the frontmatter has no \`kind: security_review\` — the projection gates a security review's findings by it (alissa-security-review §8)`, FINDINGS_FILE);
   }
+}
+
+// ── K15–K18: the doc block (design alissa-documentation-check §5.1, §5.2, lane DOC-3) ──────────────
+// K15, K16 and K18 are offline, like K10–K14. K15 holds the block to the schema and to its verdict's
+// rules; K16 its key; K18 the file's `kind`. K17 — the trust anchor — asks Studio's verify route,
+// the one K7 uses, whether each quoted passage is in its doc file at the pinned SHA.
+
+const DOC_RULES: readonly KRule[] = ["K15", "K16", "K17", "K18"];
+/** A schema error inside a question's `doc` block. */
+const DOC_PATH_RE = /^\/questions\/(\d+)\/doc(?:\/|$)/;
+/** K16's key grammar, the schema's own (§5.1 Key convention). */
+export const DOC_KEY_RE = /^[a-z0-9.-]{1,80}$/;
+/** What K17 posts for a passage, and what Studio compares it against: every whitespace run is one space, trimmed (§5.2). */
+export function normalizePassage(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+/** Does a question's `doc` block put it at impact `high` for the review line (§5.2: `wrong` with `fixSide: code`)? */
+function isHighDoc(doc: unknown): boolean {
+  return isRecord(doc) && doc.verdict === "wrong" && doc.fixSide === "code";
+}
+
+/** A schema error inside a `doc` block, as K15 (or K16, for the key's grammar) reports it. */
+function docSchemaError(e: ErrorObject, fm: unknown, fail: KbFail): void {
+  const m = DOC_PATH_RE.exec(e.instancePath) as RegExpExecArray;
+  const doc = isRecord(fm) ? fm : {};
+  const q = Array.isArray(doc.questions) ? doc.questions[Number(m[1])] : undefined;
+  const id = isRecord(q) && typeof q.id === "string" ? q.id : `#${m[1]}`;
+  if (e.keyword === "false schema") {
+    return fail("K15", `question \`${clean(id)}\` carries a \`doc\` block — it needs \`schema: ${FINDINGS_SCHEMA_V14}\` (alissa-documentation-check §5.1)`, FINDINGS_FILE);
+  }
+  if (e.instancePath.endsWith("/doc/key") && e.keyword === "pattern") {
+    const key = isRecord(q) && isRecord(q.doc) ? q.doc.key : undefined;
+    return fail("K16", `question \`${clean(id)}\`: the \`doc.key\` \`${clean(key)}\` is not \`[a-z0-9.-]{1,80}\` — \`<repo>.<doc-stem>.<subject>\`, slugged (§5.1)`, FINDINGS_FILE);
+  }
+  fail("K15", `question \`${clean(id)}\`: frontmatter ${ajvMessage(e)}`, FINDINGS_FILE);
+}
+
+/** The questions that carry a `doc` block. */
+function docBlocks(questions: Array<Record<string, unknown>>): Array<{ q: Record<string, unknown>; id: string; d: Record<string, unknown> }> {
+  const out = [];
+  for (const q of questions) if (isRecord(q.doc)) out.push({ q, id: clean(q.id), d: q.doc });
+  return out;
+}
+
+/** K15, K16 and K18 over a frontmatter K2 admitted (K17 is online: `kbPassages`). */
+function kbDoc(fm: Record<string, unknown>, questions: Array<Record<string, unknown>>, fail: KbFail): void {
+  const blocks = docBlocks(questions);
+  const keys = new Map<string, string>();
+  for (const { q, id, d } of blocks) {
+    // K15 — a question is a security finding or a doc verdict, never both.
+    if (q.security !== undefined) fail("K15", `question \`${id}\` carries both a \`security\` and a \`doc\` block — a question carries one or the other (§5.1)`, FINDINGS_FILE);
+    // K15 — the passage is quoted for every verdict but `missing`, which has none to quote.
+    const hasPassage = d.passage !== undefined;
+    if (d.verdict === "missing" && hasPassage) fail("K15", `question \`${id}\`: a \`missing\` verdict carries a \`passage\` — a missing passage has nothing to quote; \`docPath\` names where it belongs (§5.1)`, FINDINGS_FILE);
+    if (typeof d.verdict === "string" && d.verdict !== "missing" && !hasPassage) fail("K15", `question \`${id}\`: a \`${clean(d.verdict)}\` verdict carries no \`passage\` — the passage it judges is quoted verbatim (§5.1)`, FINDINGS_FILE);
+    // K15 — a `right` passage needs no code change and no question: its side is the doc's.
+    if (d.verdict === "right" && typeof d.fixSide === "string" && d.fixSide !== "doc") fail("K15", `question \`${id}\`: a \`right\` verdict has \`fixSide: ${clean(d.fixSide)}\` — it is \`doc\` (§5.2)`, FINDINGS_FILE);
+    // K15 — an answered verdict cites the code at the pinned SHA; a `missing` one, the uncovered code area.
+    const cites = Array.isArray(q.cites) ? (q.cites as unknown[]) : [];
+    if ((q.status === "answered" || q.status === "partial") && !cites.some((c) => isRecord(c) && (c.kind === undefined || c.kind === "repo"))) {
+      fail("K15", `question \`${id}\` is \`${q.status}\` and carries a \`doc\` block but no repo cite — a verdict cites the code at the pinned SHA (for \`missing\`, the uncovered code area) (§5.1)`, FINDINGS_FILE);
+    }
+    // K16 — one key per verdict in the file (its grammar is the schema's, reported above).
+    if (typeof d.key === "string" && DOC_KEY_RE.test(d.key)) {
+      const first = keys.get(d.key);
+      if (first !== undefined) fail("K16", `questions \`${first}\` and \`${id}\` share the \`doc.key\` \`${d.key}\` — a key is one passage's identity across runs (§5.1)`, FINDINGS_FILE);
+      else keys.set(d.key, id);
+    }
+  }
+  // K18 — a file with a doc verdict says it is a documentation check's.
+  if (blocks.length > 0 && fm.kind !== "doc_check") {
+    fail("K18", `${blocks.length} question(s) carry a \`doc\` block (${blocks.map((b) => `\`${b.id}\``).join(", ")}) but the frontmatter has no \`kind: doc_check\` (alissa-documentation-check §5.2)`, FINDINGS_FILE);
+  }
+}
+
+/** Studio's verify route's reasons for a passage (K17). */
+const PASSAGE_REASONS: Readonly<Record<string, string>> = {
+  path_missing: "does not exist at the pinned SHA",
+  passage_missing: "does not hold the passage (whitespace-normalized) — a passage is quoted verbatim, never paraphrased",
+};
+
+/**
+ * K17: one POST to Studio's verify route — K7's — with every distinct quoted passage, `{ passages:
+ * [{ repo, sha, path, passage }] }`, the passage whitespace-normalized and the SHA the `reads` entry
+ * of the block's `docRepo` (the task's `Alissa-Reads`, which K6 holds `reads` to). The route answers
+ * `{ results: [{ ok, reason?, detail? }] }` in the same order. Anything else — the route down, an
+ * error status (a route that does not read `passages` yet answers 400), an answer of the wrong
+ * shape — is "could not run": a passage that cannot be checked is never a pass.
+ */
+async function kbPassages(questions: Array<Record<string, unknown>>, reads: Array<{ repo: string; sha: string }>, verifier: AlissaPoster, fail: KbFail, notes: string[]): Promise<void> {
+  const shaOf = new Map(reads.map((r) => [r.repo.toLowerCase(), r.sha]));
+  const seen = new Map<string, number>();
+  const asked: Array<{ repo: string; sha: string; path: string; passage: string }> = [];
+  const askers: string[][] = [];
+  for (const { id, d } of docBlocks(questions)) {
+    if (typeof d.passage !== "string" || typeof d.docRepo !== "string" || typeof d.docPath !== "string") continue;
+    const sha = shaOf.get(d.docRepo.toLowerCase());
+    if (sha === undefined) {
+      fail("K17", `question \`${id}\`: \`doc.docRepo\` \`${clean(d.docRepo)}\` is not in \`reads\` — a passage is checked at the SHA the task pins (Alissa-Reads)`, FINDINGS_FILE);
+      continue;
+    }
+    const entry = { repo: d.docRepo, sha, path: d.docPath, passage: normalizePassage(d.passage) };
+    const key = JSON.stringify([entry.repo.toLowerCase(), entry.sha, entry.path, entry.passage]);
+    const at = seen.get(key);
+    if (at !== undefined) {
+      (askers[at] as string[]).push(id);
+      continue;
+    }
+    seen.set(key, asked.length);
+    asked.push(entry);
+    askers.push([id]);
+  }
+  if (asked.length === 0) {
+    notes.push("K17: the findings quote no doc passage");
+    return;
+  }
+  const couldNot = (why: string): void => fail("K17", `plan-lint could not run: Studio's verify route (POST ${VERIFY_ROUTE}) ${why} — a passage that cannot be checked is never a pass`, FINDINGS_FILE, true);
+  let res;
+  try {
+    res = await verifier.post(VERIFY_ROUTE, { passages: asked });
+  } catch (err) {
+    if (err instanceof AlissaUnavailable) return couldNot(`is unreachable: ${err.message}`);
+    throw err;
+  }
+  if (res.status !== 200) return couldNot(`answered ${describe(res)}`);
+  const results = (res.body as { results?: unknown } | null)?.results;
+  if (!Array.isArray(results) || results.length !== asked.length || !results.every((r) => isRecord(r) && typeof r.ok === "boolean")) {
+    return couldNot("answered in an unexpected shape");
+  }
+  results.forEach((r, i) => {
+    const rr = r as { ok: boolean; reason?: unknown; detail?: unknown };
+    if (rr.ok) return;
+    const p = asked[i] as (typeof asked)[number];
+    const why = typeof rr.reason === "string" ? (PASSAGE_REASONS[rr.reason] ?? `does not hold the passage (${clean(rr.reason)})`) : "does not hold the passage";
+    const detail = typeof rr.detail === "string" && rr.detail !== "" ? ` — ${clean(rr.detail)}` : "";
+    const ids = (askers[i] as string[]).map((x) => `\`${x}\``).join(", ");
+    fail("K17", `question(s) ${ids}: \`${clean(p.repo)}:${clean(p.path)}\` at ${p.sha.slice(0, 7)} ${why}${detail}`, FINDINGS_FILE);
+  });
 }
 
 const SCHEME_URL_RE = /\b[a-z][a-z0-9+.-]{0,31}:\/\/[^\s<>"'`)\]]+/gi;
