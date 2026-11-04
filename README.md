@@ -520,6 +520,12 @@ npm run plan-lint -- --kb knowledge-base/assessments/shop-2026-10-14.md --task T
   before it looks for the passage. A `missing` verdict quotes nothing and posts nothing. K17 is what
   makes a verdict trustworthy: it stops a model paraphrasing a passage it then judges. A route that
   does not read `passages` yet answers 400, which is *plan-lint could not run*, never a pass.
+  **Known gap:** Studio's route does not implement this contract yet. As of 2026-11-04,
+  `convex/buildKnowledge.ts` `validateVerifyFiles` in `ali-fhr/studio.alissa.app` reads only
+  `{ files }` and answers 400 to `{ passages }`. Until Studio changes, every `kind: doc_check` finding
+  linted online exits `3`, and K17's message says the route may not read `passages` yet. That is
+  fail-closed, never a false pass. `--offline` skips K17, so K15, K16 and K18 still run. The Studio work
+  is tracked by TASK-559693681 (from the review of PR #24). This repository cannot carry it.
 - **K8 goes through Studio's url-cites route**, which fetches each page behind DS-16's guarded fetch
   (https only, every resolved address checked, redirects re-checked, no credentials), so the trusted
   job, which holds the lint token, never fetches a URL a PR author chose. The linter posts every
