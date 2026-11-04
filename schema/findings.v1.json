@@ -1,15 +1,19 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/ali-fhr/alissa-plans/schema/findings.v1.json",
-  "title": "alissa-plans findings frontmatter, version 1.3 (knowledge-base/<YYYY>/<MM>/<DD>/TASK-<n>/findings.md)",
-  "description": "Widened in place from v1 (design alissa-build-discovery §2.3, §2.5, §4.6), so every alissa-findings/v1 file validates as written. v1.1 adds the URL cite beside the repo cite, bodyOfWork as the alternative to project (exactly one of the two), asker, and reads that may be empty. v1.2 (operator decision 2026-10-20) adds the evidence cite, naming a file of the finding's own evidence/ folder; a v1 or v1.1 file carries none. v1.3 (design alissa-security-review §5.1, lane SR-2) adds the optional `security` block on a question and the file-level `kind: security_review` that K14 requires beside it; a v1, v1.1 or v1.2 file carries neither.",
+  "title": "alissa-plans findings frontmatter, version 1.4 (knowledge-base/<YYYY>/<MM>/<DD>/TASK-<n>/findings.md)",
+  "description": "Widened in place from v1 (design alissa-build-discovery §2.3, §2.5, §4.6), so every alissa-findings/v1 file validates as written. v1.1 adds the URL cite beside the repo cite, bodyOfWork as the alternative to project (exactly one of the two), asker, and reads that may be empty. v1.2 (operator decision 2026-10-20) adds the evidence cite, naming a file of the finding's own evidence/ folder; a v1 or v1.1 file carries none. v1.3 (design alissa-security-review §5.1, lane SR-2) adds the optional `security` block on a question and the file-level `kind: security_review` that K14 requires beside it; a v1, v1.1 or v1.2 file carries neither. v1.4 (design alissa-documentation-check §5.1, lane DOC-3) adds the optional `doc` block on a question — a documentation passage's verdict against the code — and `kind: doc_check`, which K18 requires beside it; a question carries `security` or `doc`, never both (K15), and a file before v1.4 carries neither.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "task", "reads", "topics", "questions"],
   "oneOf": [{ "required": ["project"], "properties": { "project": true } }, { "required": ["bodyOfWork"], "properties": { "bodyOfWork": true } }],
   "properties": {
-    "schema": { "type": "string", "enum": ["alissa-findings/v1", "alissa-findings/v1.1", "alissa-findings/v1.2", "alissa-findings/v1.3"] },
-    "kind": { "description": "v1.3: a security review's finding says so, so the projection can gate it (K14, design alissa-security-review §8).", "const": "security_review" },
+    "schema": { "type": "string", "enum": ["alissa-findings/v1", "alissa-findings/v1.1", "alissa-findings/v1.2", "alissa-findings/v1.3", "alissa-findings/v1.4"] },
+    "kind": {
+      "description": "v1.3: a security review's finding says so, so the projection can gate it (K14, design alissa-security-review §8). v1.4: a documentation check's finding says `doc_check` (K18, design alissa-documentation-check §5.2).",
+      "type": "string",
+      "enum": ["security_review", "doc_check"]
+    },
     "task": { "$ref": "#/definitions/taskRef" },
     "project": { "$ref": "#/definitions/convexId" },
     "bodyOfWork": { "$ref": "#/definitions/convexId" },
@@ -45,6 +49,7 @@
           "reason": { "type": "string" },
           "cites": { "type": "array", "maxItems": 24, "items": { "$ref": "#/definitions/cite" } },
           "security": { "$ref": "#/definitions/security" },
+          "doc": { "$ref": "#/definitions/doc" },
           "unblocks": {
             "type": "array",
             "minItems": 1,
@@ -99,12 +104,22 @@
   },
   "allOf": [
     {
-      "if": { "properties": { "schema": { "not": { "const": "alissa-findings/v1.3" } } } },
+      "if": { "properties": { "schema": { "not": { "enum": ["alissa-findings/v1.3", "alissa-findings/v1.4"] } } } },
       "then": {
         "description": "A file before alissa-findings/v1.3 carries no `security` block and no `kind`: those are v1.3's.",
         "properties": {
           "kind": false,
           "questions": { "items": { "properties": { "security": false } } }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "schema": { "not": { "const": "alissa-findings/v1.4" } } } },
+      "then": {
+        "description": "A file before alissa-findings/v1.4 carries no `doc` block and no `kind: doc_check`: those are v1.4's.",
+        "properties": {
+          "kind": { "not": { "const": "doc_check" } },
+          "questions": { "items": { "properties": { "doc": false } } }
         }
       }
     },
@@ -159,6 +174,24 @@
         "crossRun": { "type": "string", "enum": ["new", "still_open", "fixed", "regressed"] },
         "cwe": { "type": "string", "pattern": "^CWE-[1-9][0-9]{0,5}$" },
         "calibration": { "$ref": "#/definitions/oneLine", "maxLength": 300 }
+      }
+    },
+    "doc": {
+      "description": "v1.4 (design alissa-documentation-check §5.1): one documentation passage's verdict against the code at the pinned SHA. The code cites are the question's ordinary `cites`. `passage` is quoted verbatim from `docPath` at `docRepo`'s pinned SHA (K17) and is absent exactly when `verdict` is `missing`; a `right` verdict's `fixSide` is `doc`; an `answered` or `partial` question with a block carries at least one repo cite (K15). `key` is `<repo>.<doc-stem>.<subject>`, an identity across runs, unique in the file (K16).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "verdict", "area", "docRepo", "docPath", "fixSide", "crossRun"],
+      "properties": {
+        "key": { "type": "string", "pattern": "^[a-z0-9.-]{1,80}$" },
+        "verdict": { "type": "string", "enum": ["right", "wrong", "stale", "missing"] },
+        "area": { "type": "string", "enum": ["readme", "docs", "agent", "api", "site"] },
+        "docRepo": { "$ref": "#/definitions/repo" },
+        "docPath": { "type": "string", "maxLength": 512, "pattern": "^(?!/)(?!(?:.*/)?\\.\\.(?:/|$))[^\\r\\n]+$" },
+        "anchor": { "$ref": "#/definitions/oneLine", "maxLength": 200 },
+        "passage": { "type": "string", "minLength": 1, "maxLength": 600 },
+        "correction": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "fixSide": { "type": "string", "enum": ["doc", "code", "ask"] },
+        "crossRun": { "type": "string", "enum": ["new", "newly_drifted", "still_wrong", "fixed"] }
       }
     },
     "httpsUrl": { "type": "string", "maxLength": 2048, "pattern": "^https://[^\\s]+$" },

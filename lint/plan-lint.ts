@@ -11,12 +11,14 @@
 // https://api.alissa.app), and rule 5b reads each task's repository on GitHub (GITHUB_TOKEN or
 // GH_TOKEN when set; GITHUB_API_URL overrides https://api.github.com). --offline runs rules 1–9 only. --summary-file <path> appends a Markdown
 // report; --check-output <path> writes { conclusion, title, summary } for a check run.
-// A pull request that changes any knowledge-base/** file is linted in the knowledge-base mode, K1–K14
+// A pull request that changes any knowledge-base/** file is linted in the knowledge-base mode, K1–K18
 // (design alissa-build-discovery §3.4; K10–K14, a question's `security` block, alissa-security-review
-// §5.2): K1–K5 and K9–K14 offline, K6 reads the task, K7 posts the repo cites to Studio's verify route
-// and K8 the URL cites to its url-cites route; --kb runs the same rules over a local directory. A
-// finding's report ends with its `Discovery-Review: none | light — <reasons>` line, where a `critical`
-// or `high` security block counts as impact `high`. A pull request that changes
+// §5.2; K15–K18, a question's `doc` block, alissa-documentation-check §5.2): K1–K5, K9–K16 and K18
+// offline, K6 reads the task, K7 posts the repo cites and K17 the quoted doc passages to Studio's
+// verify route, and K8 the URL cites to its url-cites route; --kb runs the same rules over a local
+// directory. A finding's report ends with its `Discovery-Review: none | light — <reasons>` line, where a
+// `critical` or `high` security block, or a `wrong` doc verdict with `fixSide: code`, counts as impact
+// `high`. A pull request that changes
 // any integration-check/** file is linted in the integration-check mode, I1–I9 (design
 // alissa-build-integration-check §3.5): I1, I2 and I4–I8 offline, I3 and I9 read Alissa; --ic runs
 // the same rules over a local run directory.
@@ -39,7 +41,7 @@ import {
 import { type PlanSource, UsageError, isTaskPath, readIcDir, readKbDir, readPlanDir, readPlanFromGit } from "./source.ts";
 
 export const DEFAULT_ALISSA_BASE = "https://api.alissa.app";
-/** How long K7's and K8's POSTs wait for Studio: K8's route reads up to 48 pages before it answers. */
+/** How long K7's, K8's and K17's POSTs wait for Studio: K8's route reads up to 48 pages before it answers. */
 export const KB_VERIFY_TIMEOUT_MS = 120_000;
 
 export interface Report {
@@ -195,7 +197,7 @@ const USAGE = `usage:
   plan-lint --kb <findings-dir | assessment.md> [--offline] [--base <ref> | --no-base] [--task TASK-<n>]
   plan-lint --ic <integration-check/<YYYY>/<MM>/<DD>/<milestone>> [--offline] [--base <ref> | --no-base] [--task TASK-<n>]
 options: --summary-file <path>  --check-output <path>
-env: ALISSA_API_TOKEN (rules 10–12, K6–K8, I3 and I9), ALISSA_BASE (default ${DEFAULT_ALISSA_BASE}),
+env: ALISSA_API_TOKEN (rules 10–12, K6–K8, K17, I3 and I9), ALISSA_BASE (default ${DEFAULT_ALISSA_BASE}),
      GITHUB_HEAD_REF (the PR's TASK-<n>-… branch, when --task is not given),
      GITHUB_TOKEN or GH_TOKEN (rule 5b, optional), GITHUB_API_URL (default ${DEFAULT_GITHUB_API})`;
 
@@ -287,11 +289,11 @@ function readerFor(offline: boolean, env: NodeJS.ProcessEnv): Parameters<typeof 
   return { online: true, reader: httpReader({ base: env.ALISSA_BASE || DEFAULT_ALISSA_BASE, token }), github: githubReader(env) };
 }
 
-/** The knowledge-base mode's online half: K6 (and an assessment's task) through the reader, K7 and K8 through Studio's verify routes. */
+/** The knowledge-base mode's online half: K6 (and an assessment's task) through the reader, K7, K8 and K17 through Studio's verify routes. */
 function kbOptionsFor(offline: boolean, env: NodeJS.ProcessEnv, prTask: string | null): KbLintOptions {
   if (offline) return { online: false, prTask };
   const token = env.ALISSA_API_TOKEN;
-  if (!token) throw new UsageError("K6–K8 need ALISSA_API_TOKEN; pass --offline to run K1–K5 and K9–K14 only");
+  if (!token) throw new UsageError("K6–K8 and K17 need ALISSA_API_TOKEN; pass --offline to run K1–K5, K9–K16 and K18 only");
   const base = env.ALISSA_BASE || DEFAULT_ALISSA_BASE;
   // K8's route fetches every page (and its archive) behind a 10 s per-fetch guard before it answers.
   return { online: true, reader: httpReader({ base, token }), verifier: httpPoster({ base, token, timeoutMs: KB_VERIFY_TIMEOUT_MS }), prTask };

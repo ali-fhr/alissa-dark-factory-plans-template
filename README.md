@@ -332,7 +332,7 @@ A discovery task (design `alissa-build-discovery.md` §2–§4) answers its ques
 repository, read at a pinned SHA, and writes exactly one new directory here:
 `knowledge-base/<YYYY>/<MM>/<DD>/TASK-<n>/findings.md`, the date being the task's creation day
 (UTC), with an optional `evidence/` folder beside it (below). Its frontmatter validates against
-`schema/findings.v1.json` (`schema: alissa-findings/v1`, `alissa-findings/v1.1`, `/v1.2` or `/v1.3`, `task`, `project`, `reads` — each repository at its 40-hex SHA —
+`schema/findings.v1.json` (`schema: alissa-findings/v1`, `alissa-findings/v1.1`, `/v1.2`, `/v1.3` or `/v1.4`, `task`, `project`, `reads` — each repository at its 40-hex SHA —
 `topics`, `questions` with their `status`, `confidence`, `answer` or `reason`, `cites` and
 `unblocks`, then optional `risks` and `suggestedTasks`); its body is a `## Summary` and one section
 per question.
@@ -425,6 +425,53 @@ Studio's projection keeps `severity`, `category`, `key` and `crossRun`, and read
 The fixtures `kb-k10-…` to `kb-k14-…` fail exactly their rule; `kb-k1<n>-ok-…` is each rule's
 passing case.
 
+**Documentation — findings v1.4** (design `alissa-documentation-check.md` §5.1, §5.2 in
+`ali-fhr/studio.alissa.app`, lane DOC-3): a documentation check's finding carries, per question, one
+optional `doc` block — one documentation passage's verdict against the code at the pinned SHA — and
+the file says what it is with `kind: doc_check`. v1.4 widens v1.3: every v1–v1.3 file, security
+blocks included, validates as written; neither the `doc` block nor `kind: doc_check` is admitted
+before `schema: alissa-findings/v1.4`. A question carries `security` or `doc`, never both.
+
+```yaml
+schema: alissa-findings/v1.4
+kind: doc_check                              # required beside any doc block (K18)
+questions:
+  - id: q4
+    text: Does the README's "Run locally" section give the commands the repo actually uses?
+    status: answered
+    cites: [ … ]                             # the code cites, as ever; at least one repo cite (K15)
+    doc:
+      key: shop-api.readme.run-locally       # <repo>.<doc-stem>.<subject>, [a-z0-9.-]{1,80}, unique in the file (K16)
+      verdict: wrong                         # right | wrong | stale | missing
+      area: readme                           # readme | docs | agent | api | site
+      docRepo: acme/shop-api                 # in `reads`: the passage is read at its pinned SHA (K17)
+      docPath: README.md
+      anchor: run-locally                    # heading slug, optional
+      passage: >-                            # verbatim, ≤ 600 characters; absent for `missing` (K15, K17)
+        …
+      correction: >-                         # optional, ≤ 1,000 characters: what the doc should say; for `code`, what the code should do
+        …
+      fixSide: doc                           # doc | code | ask; `doc` on a `right` verdict (K15)
+      crossRun: new                          # new | newly_drifted | still_wrong | fixed
+```
+
+| Verdict | Means | Passage |
+|---|---|---|
+| `right` | The passage says what the code does at the pinned SHA | quoted |
+| `wrong` | The passage contradicts what the code does (a different command, field, default, behaviour) | quoted |
+| `stale` | The passage names something the code no longer has (a path, symbol, route, flag or env var that does not resolve), or describes a removed feature | quoted |
+| `missing` | A user-facing code area or behaviour has no passage at all | absent; `docPath` names where it belongs |
+
+The code cites are the question's ordinary `cites`, so staleness and K7 work unchanged; an
+`answered` or `partial` question with a block cites at least one repository file — for `missing`,
+the uncovered code area. The key is an identity across runs, not a description of the verdict: a
+gap filled on a re-run keeps its predecessor's key, `missing` stem included. A `wrong` verdict with
+`fixSide: code` puts its question at impact `high` on the review line below; every other verdict
+follows discovery's default.
+
+The fixtures `kb-k15-…` to `kb-k18-…` fail exactly their rule; `kb-k1<n>-ok-…` is each rule's
+passing case.
+
 The knowledge base is
 **append-only**: a merged finding is never edited, and a newer one names it in `reverifies`. The
 index of findings is a Studio projection, never a committed file.
@@ -448,10 +495,14 @@ never *nothing to lint* — under the K rules, numbered apart from §5.5's:
 | K12 | cited finding | a `security` block on a question that is not `answered` or `partial`, or whose `cites` hold no repo or evidence cite (a URL cite alone does not ground it) | — |
 | K13 | no secrets in scenario | a `scenario` or `fix` carrying a secret-shaped string (K5's token shapes), a full URL to a host other than `github.com`, or an IP address (v4 or v6; a v6 candidate counts only with a decimal digit or three or more non-empty groups, so hex-only `::` symbol paths like `db::add` pass — and so does an all-letter address of at most two groups, like `fd::`, a known false negative) — named by kind and count, never quoted | — |
 | K14 | security file | a `findings.md` with any `security` block whose frontmatter lacks `kind: security_review`, so the projection can gate it (§8) | — |
+| K15 | doc shape | a `doc` block that fails the schema (a field missing or off its list, a `passage` over 600 characters or a `correction` over 1,000, a block in a file before v1.4); a `passage` absent on a non-`missing` verdict or present on `missing`; a `right` verdict whose `fixSide` is not `doc`; a question carrying both `security` and `doc`; an `answered` or `partial` question with a block and no repo cite | — |
+| K16 | doc key | two questions in one file sharing a `doc.key`; a key that is not `[a-z0-9.-]{1,80}` | — |
+| K17 | verbatim passage | a `passage` that is not a substring of `docPath` at the SHA `reads` pins for `docRepo` (the task's `Alissa-Reads`), whitespace-normalized; a `docRepo` not in `reads` — asked of Studio through K7's verify route, never of GitHub | Studio |
+| K18 | doc file | a `findings.md` with any `doc` block whose frontmatter lacks `kind: doc_check` | — |
 
 ```sh
-npm run plan-lint -- --kb knowledge-base/2026/10/14/TASK-1234             # K1–K14 (K6–K8 need ALISSA_API_TOKEN)
-npm run plan-lint -- --kb knowledge-base/2026/10/14/TASK-1234 --offline   # K1–K5 and K9–K14 only, no network
+npm run plan-lint -- --kb knowledge-base/2026/10/14/TASK-1234             # K1–K18 (K6–K8 and K17 need ALISSA_API_TOKEN)
+npm run plan-lint -- --kb knowledge-base/2026/10/14/TASK-1234 --offline   # K1–K5, K9–K16 and K18 only, no network
 npm run plan-lint -- --kb knowledge-base/assessments/shop-2026-10-14.md --task TASK-2000
 ```
 
@@ -460,6 +511,15 @@ npm run plan-lint -- --kb knowledge-base/assessments/shop-2026-10-14.md --task T
   token and the body `{ "files": [{ "repo", "sha", "path", "blob", "lines" }] }`, and expects
   `200 { "results": [{ "ok": true } | { "ok": false, "reason": "path_missing" | "blob_mismatch" |
   "lines_out_of_range", "detail"?: "…" }] }`, one result per file in request order.
+- **K17 goes through the same route.** In a second POST, the linter sends every distinct quoted
+  passage once, `{ "passages": [{ "repo", "sha", "path", "passage" }] }` — `repo` and `path` the
+  block's `docRepo` and `docPath`, `sha` the one `reads` pins for `docRepo`, `passage`
+  whitespace-normalized (every run of whitespace one space, trimmed) — and expects `200 { "results":
+  [{ "ok": true } | { "ok": false, "reason": "path_missing" | "passage_missing", "detail"?: "…" }]
+  }`, one result per passage in request order, the route normalizing the file's text the same way
+  before it looks for the passage. A `missing` verdict quotes nothing and posts nothing. K17 is what
+  makes a verdict trustworthy: it stops a model paraphrasing a passage it then judges. A route that
+  does not read `passages` yet answers 400, which is *plan-lint could not run*, never a pass.
 - **K8 goes through Studio's url-cites route**, which fetches each page behind DS-16's guarded fetch
   (https only, every resolved address checked, redirects re-checked, no credentials), so the trusted
   job, which holds the lint token, never fetches a URL a PR author chose. The linter posts every
@@ -476,14 +536,15 @@ npm run plan-lint -- --kb knowledge-base/assessments/shop-2026-10-14.md --task T
   cite and no question's `unblocks` carries `impact: high`, otherwise `Discovery-Review: light —
   <reasons>`, the reasons being `external cites: <n>` and `high impact: <question ids>`, joined by
   `; ` (design §3.6). A question whose `security` block is `critical` or `high` counts as impact
-  `high` (alissa-security-review §5.2), so a serious security finding always gets the light round. devloop, revloop and orcloop read this line, never their own reading of the
+  `high` (alissa-security-review §5.2), so a serious security finding always gets the light round, and so
+  does a `doc` block whose verdict is `wrong` with `fixSide: code` (alissa-documentation-check §5.2). devloop, revloop and orcloop read this line, never their own reading of the
   file. Findings too malformed to classify (K2) carry no line; a reader takes a missing line as
   `light`.
 - **Fail closed.** When the route is down, answers an error or an unexpected shape — or Alissa
-  cannot be read for K6, or K8's route answers `unavailable` for a cite — the run reports
+  cannot be read for K6, or K8's route answers `unavailable` for a cite, or K17's passages cannot be checked — the run reports
   **`plan-lint could not run`**: the check's conclusion is `failure`, its title starts with those
   words and the linter exits `3`. It is never a pass. Without `ALISSA_API_TOKEN` the linter refuses to run rather than skip
-  K6–K8.
+  K6–K8 and K17.
 - **The check's title says the mode**: `PASS — knowledge-base — <dir>`, `FAIL — K<n> (<name>) —
   knowledge-base — <dir>`, or `plan-lint could not run — K<n> (<name>) — <dir>`. orcloop's merge
   edge merges a discovery PR on the first of these (design §3.5).
@@ -492,7 +553,8 @@ npm run plan-lint -- --kb knowledge-base/assessments/shop-2026-10-14.md --task T
   lacks `modes: … knowledge-base` gets no discovery tasks planned for it, and one whose stamp lacks
   `findings-schema: alissa-findings/v1.1` and `K8` in `kb-rules` gets no URL cites (lane DS-11); one
   whose stamp lacks `alissa-findings/v1.2` and `K9` lints no `evidence/` folder; one whose stamp
-  lacks `alissa-findings/v1.3` and `K10`–`K14` lints no `security` block.
+  lacks `alissa-findings/v1.3` and `K10`–`K14` lints no `security` block; one whose stamp lacks
+  `alissa-findings/v1.4` and `K15`–`K18` lints no `doc` block.
   `lint/test/kb.test.ts` keeps the stamp in step with the schemas and the rules.
 - **Rollout.** The template changes new plans repositories only; the provisioner never overwrites
   an adopted one. Until an existing repository is upgraded — by an ordinary `TASK-` lane in that

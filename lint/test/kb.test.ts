@@ -35,11 +35,11 @@ after(async () => {
 
 /**
  * One fixture per K rule, each failing exactly its rule; `kb-k8-archived` is K8's passing case, and
- * `kb-k1<n>-ok-*` is each of K10–K14's (v1.3, lane SR-2).
+ * `kb-k1<n>-ok-*` is each of K10–K14's (v1.3, lane SR-2) and K15–K18's (v1.4, lane DOC-3).
  */
 const kbCases = caseNames().filter((n) => /^kb-k\d+-/.test(n) && n !== "kb-k8-archived" && !/^kb-k\d+-ok-/.test(n));
 const ruleOf = (name: string): KRule => {
-  const m = /^kb-(k(?:[1-8]|1[0-4]))-[a-z0-9-]+$/.exec(name);
+  const m = /^kb-(k(?:[1-8]|1[0-8]))-[a-z0-9-]+$/.exec(name);
   assert.ok(m, `fixture case \`${name}\` is named kb-k<n>-<what>`);
   return (m[1] as string).toUpperCase() as KRule;
 };
@@ -81,16 +81,16 @@ const prArgs = (pr: { repo: string; base: string; head: string }, extra: string[
 
 describe("knowledge-base fixtures (c2)", () => {
   it("has the golden findings, the assessment, one fixture per K rule and one per failing K8 verdict", () => {
-    assert.deepEqual(kbCases.map(ruleOf), ["K1", "K10", "K11", "K12", "K13", "K14", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K8", "K8", "K8"]);
+    assert.deepEqual(kbCases.map(ruleOf), ["K1", "K10", "K11", "K12", "K13", "K14", "K15", "K16", "K17", "K18", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K8", "K8", "K8"]);
     assert.deepEqual(kbCases.filter((n) => n.startsWith("kb-k8-")), ["kb-k8-blocked", "kb-k8-gone", "kb-k8-refuted", "kb-k8-unavailable"]);
     for (const n of ["kb-golden", "kb-golden-web", "kb-assessment", "kb-k8-archived"]) assert.ok(caseNames().includes(n), n);
   });
 
   for (const name of ["kb-golden", "kb-golden-web"]) {
-    it(`${name} passes K1–K14`, async () => {
+    it(`${name} passes K1–K18`, async () => {
       const r = await lintCase(name);
       assert.deepEqual(r.failures, []);
-      assert.deepEqual(r.rulesRun, ["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9", "K10", "K11", "K12", "K13", "K14"]);
+      assert.deepEqual(r.rulesRun, ["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9", "K10", "K11", "K12", "K13", "K14", "K15", "K16", "K17", "K18"]);
       assert.equal(r.questionCount, 2);
     });
   }
@@ -133,22 +133,26 @@ describe("knowledge-base fixtures (c2)", () => {
     assert.match(await messages("kb-k13-scenario-secrets"), /question `q1`: `security\.scenario` carries 1 full URL\(s\) to a host other than github\.com/);
     assert.match(await messages("kb-k13-scenario-secrets"), /question `q1`: `security\.scenario` carries 1 IP address\(es\)/);
     assert.match(await messages("kb-k14-security-file"), /2 question\(s\) carry a `security` block \(`q1`, `q2`\) but the frontmatter has no `kind: security_review`/);
+    assert.match(await messages("kb-k15-doc-shape"), /question `q1`: a `right` verdict has `fixSide: code` — it is `doc`/);
+    assert.match(await messages("kb-k16-doc-key"), /questions `q1` and `q2` share the `doc\.key` `service-b\.readme\.npm-run-dev`/);
+    assert.match(await messages("kb-k17-verbatim-passage"), /question\(s\) `q1`: `example-org\/service-b:README\.md` at 3f9c2a1 does not hold the passage \(whitespace-normalized\)/);
+    assert.match(await messages("kb-k18-doc-file"), /2 question\(s\) carry a `doc` block \(`q1`, `q2`\) but the frontmatter has no `kind: doc_check`/);
     assert.match(await messages("kb-k8-unavailable"), /^plan-lint could not run: URL cite `https:\/\/docs\.example\.com\/flaky` is unavailable \(a 5xx or a timeout\)/);
   });
 
-  it("offline runs K1–K5 and K9 only; the K6, K7 and K8 fixtures pass them", async () => {
-    for (const name of ["kb-golden", "kb-golden-web", "kb-k6-task", "kb-k7-cites", "kb-k8-refuted", "kb-k8-gone", "kb-k8-blocked", "kb-k8-unavailable", "kb-k8-archived"]) {
+  it("offline runs K1–K5, K9–K16 and K18 only; the K6, K7, K8 and K17 fixtures pass them", async () => {
+    for (const name of ["kb-golden", "kb-golden-web", "kb-k6-task", "kb-k7-cites", "kb-k8-refuted", "kb-k8-gone", "kb-k8-blocked", "kb-k8-unavailable", "kb-k8-archived", "kb-k17-verbatim-passage"]) {
       const run = await runCli(["--kb", kbFixture(name), "--no-base", "--offline"]);
       assert.equal(run.status, 0, run.stdout + run.stderr);
-      assert.match(run.stdout, /knowledge-base mode — [12] question\(s\) — K1–K5, K9–K14$/m);
-      assert.match(run.stdout, /K6–K8 not run \(offline\)/);
+      assert.match(run.stdout, /knowledge-base mode — [12] question\(s\) — K1–K5, K9–K16, K18$/m);
+      assert.match(run.stdout, /K6–K8 and K17 not run \(offline\)/);
     }
   });
 
   it("online without ALISSA_API_TOKEN it refuses to run rather than skip K6–K8", async () => {
     const run = await runCli(["--kb", kbFixture("kb-golden"), "--no-base"]);
     assert.equal(run.status, 2);
-    assert.match(run.stderr, /K6–K8 need ALISSA_API_TOKEN/);
+    assert.match(run.stderr, /K6–K8 and K17 need ALISSA_API_TOKEN/);
   });
 });
 
@@ -215,7 +219,7 @@ describe("--pr in the knowledge-base mode (c1, c3)", () => {
     const run = await runCli(prArgs(pr, ["--check-output", out]), cliEnv(api));
     assert.equal(run.status, 0, run.stdout + run.stderr);
     assert.doesNotMatch(run.stdout, /nothing to lint/);
-    assert.match(run.stdout, /^plan-lint: knowledge-base\/2026\/10\/14\/TASK-1234 — knowledge-base mode — 2 question\(s\) — K1–K14$/m);
+    assert.match(run.stdout, /^plan-lint: knowledge-base\/2026\/10\/14\/TASK-1234 — knowledge-base mode — 2 question\(s\) — K1–K18$/m);
     const check = JSON.parse(readFileSync(out, "utf8")) as { conclusion: string; title: string };
     assert.deepEqual(check, { ...check, conclusion: "success", title: "PASS — knowledge-base — knowledge-base/2026/10/14/TASK-1234" });
   });
@@ -763,19 +767,19 @@ describe("evidence/ — K1 types, K4 caps, K5 scan, K9 cites (EV-1)", () => {
     assert.ok(f.some((x) => x.file === file && re.test(x.message)), JSON.stringify(f, null, 2));
   };
 
-  it("c1: the golden finding — a cited png and csv — passes K1–K14, through --kb and --pr", async () => {
+  it("c1: the golden finding — a cited png and csv — passes K1–K18, through --kb and --pr", async () => {
     const r = await lintCase("kb-evidence");
     assert.deepEqual(r.failures, []);
-    assert.deepEqual(r.rulesRun, ["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9", "K10", "K11", "K12", "K13", "K14"]);
+    assert.deepEqual(r.rulesRun, ["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9", "K10", "K11", "K12", "K13", "K14", "K15", "K16", "K17", "K18"]);
     const run = await runCli(["--kb", kbFixture("kb-evidence"), "--no-base"], cliEnv(api));
     assert.equal(run.status, 0, run.stdout + run.stderr);
-    assert.match(run.stdout, /K1–K14$/m);
+    assert.match(run.stdout, /K1–K18$/m);
     const pr = await runCli(prArgs(kbPr("kb-evidence")), cliEnv(api));
     assert.equal(pr.status, 0, pr.stdout + pr.stderr);
-    assert.match(pr.stdout, /^plan-lint: knowledge-base\/2026\/10\/20\/TASK-1300 — knowledge-base mode — 2 question\(s\) — K1–K14$/m);
+    assert.match(pr.stdout, /^plan-lint: knowledge-base\/2026\/10\/20\/TASK-1300 — knowledge-base mode — 2 question\(s\) — K1–K18$/m);
     const off = await runCli(["--kb", kbFixture("kb-evidence"), "--no-base", "--offline"]);
     assert.equal(off.status, 0, off.stdout);
-    assert.match(off.stdout, /— K1–K5, K9–K14$/m);
+    assert.match(off.stdout, /— K1–K5, K9–K16, K18$/m);
   });
 
   it("c2: K9 refuses an uncited evidence file, naming it", async () => {
@@ -1033,6 +1037,7 @@ describe("evidence/ — K1 types, K4 caps, K5 scan, K9 cites (EV-1)", () => {
     assert.equal(kRulesRan(["K1", "K2", "K3", "K4", "K5", "K9"]), "K1–K5, K9");
     assert.equal(kRulesRan(["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9"]), "K1–K9");
     assert.equal(kRulesRan(["K1", "K2", "K3", "K4", "K5", "K9", "K10", "K11", "K12", "K13", "K14"]), "K1–K5, K9–K14");
+    assert.equal(kRulesRan(["K1", "K2", "K3", "K4", "K5", "K9", "K10", "K11", "K12", "K13", "K14", "K15", "K16", "K18"]), "K1–K5, K9–K16, K18");
     assert.equal(kRulesRan(["K1", "K5"]), "K1, K5");
     assert.equal(kRulesRan(["K1", "K4", "K5"]), "K1, K4, K5");
   });
@@ -1051,16 +1056,16 @@ describe("findings v1.3 — the security block and K10–K14 (alissa-security-re
   const said = (f: Array<{ rule: string; message: string }>) => f.map((x) => `${x.rule} ${x.message}`).join("\n");
   const rulesOf = (f: Array<{ rule: string }>) => [...new Set(f.map((x) => x.rule))];
 
-  it("has a passing fixture for each of K10–K14, and each passes K1–K14 online and offline", async () => {
+  it("has a passing fixture for each of K10–K14, and each passes K1–K18 online and offline", async () => {
     for (const rule of ["k10", "k11", "k12", "k13", "k14"]) assert.ok(okCases.some((n) => n.startsWith(`kb-${rule}-ok-`)), rule);
     for (const name of okCases) {
       assert.ok(caseNames().includes(name), name);
       const r = await lintCase(name);
       assert.deepEqual(r.failures, [], `${name}: ${said(r.failures)}`);
-      assert.deepEqual(r.rulesRun, ["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9", "K10", "K11", "K12", "K13", "K14"]);
+      assert.deepEqual(r.rulesRun, ["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9", "K10", "K11", "K12", "K13", "K14", "K15", "K16", "K17", "K18"]);
       const run = await runCli(["--kb", kbFixture(name), "--no-base", "--offline"]);
       assert.equal(run.status, 0, run.stdout + run.stderr);
-      assert.match(run.stdout, /— K1–K5, K9–K14$/m);
+      assert.match(run.stdout, /— K1–K5, K9–K16, K18$/m);
     }
   });
 
@@ -1186,6 +1191,202 @@ describe("findings v1.3 — the security block and K10–K14 (alissa-security-re
     const medium = await offline(base().replace("severity: high", "severity: medium"));
     assert.deepEqual(medium.review, { level: "none", reasons: [] });
     const run = await runCli(["--kb", kbFixture("kb-k14-ok-security-review"), "--no-base", "--offline"]);
+    assert.match(run.stdout, /^Discovery-Review: light — high impact: q1$/m);
+  });
+});
+
+describe("findings v1.4 — the doc block and K15–K18 (alissa-documentation-check §5.1, §5.2, lane DOC-3)", () => {
+  const okCases = ["kb-k15-ok-stale-and-missing", "kb-k16-ok-distinct-keys", "kb-k17-ok-whitespace", "kb-k18-ok-doc-check"];
+  const ALL: KRule[] = ["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9", "K10", "K11", "K12", "K13", "K14", "K15", "K16", "K17", "K18"];
+  const base = () => readFileSync(join(kbFixture("kb-k18-ok-doc-check"), "findings.md"), "utf8");
+  const variantDir = (text: string): string => {
+    const dir = join(tempDir("kb-v14"), "knowledge-base", "2026", "10", "14", "TASK-1343");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "findings.md"), text);
+    return dir;
+  };
+  const offline = async (text: string) => lintKb(readKbDir(variantDir(text), null), { online: false });
+  const online = async (text: string) => lintKb(readKbDir(variantDir(text), null), kbOnlineAgainst(api));
+  const said = (f: Array<{ rule: string; message: string }>) => f.map((x) => `${x.rule} ${x.message}`).join("\n");
+  const rulesOf = (f: Array<{ rule: string }>) => [...new Set(f.map((x) => x.rule))];
+  const q2Doc = /( {4}doc:\n {6}key: service-b\.missing\.src-config-keys\n(?: {6}.*\n| {8}.*\n)+)/;
+
+  it("has a passing fixture for each of K15–K18, and each passes K1–K18 online and K1–K5, K9–K16, K18 offline", async () => {
+    for (const rule of ["k15", "k16", "k17", "k18"]) assert.ok(okCases.some((n) => n.startsWith(`kb-${rule}-ok-`)), rule);
+    for (const name of okCases) {
+      assert.ok(caseNames().includes(name), name);
+      const r = await lintCase(name);
+      assert.deepEqual(r.failures, [], `${name}: ${said(r.failures)}`);
+      assert.deepEqual(r.rulesRun, ALL);
+      const run = await runCli(["--kb", kbFixture(name), "--no-base", "--offline"]);
+      assert.equal(run.status, 0, run.stdout + run.stderr);
+      assert.match(run.stdout, /— K1–K5, K9–K16, K18$/m);
+      assert.match(run.stdout, /K6–K8 and K17 not run \(offline\)/);
+      const cli = await runCli(["--kb", kbFixture(name), "--no-base"], cliEnv(api));
+      assert.equal(cli.status, 0, cli.stdout + cli.stderr);
+      assert.match(cli.stdout, /— K1–K18$/m);
+    }
+  });
+
+  it("the schema reads v1.4 with the block; every earlier v1.x fixture, v1.3's security ones included, still validates as written", () => {
+    const validate = findingsSchema();
+    for (const name of okCases) assert.ok(validate(yamlOf(readFileSync(join(kbFixture(name), "findings.md"), "utf8"))), `${name}: ${JSON.stringify(validate.errors)}`);
+    for (const name of ["kb-golden", "kb-golden-web", "kb-evidence", "kb-k8-archived", "kb-k14-ok-security-review"]) {
+      const fm = yamlOf(readFileSync(join(kbFixture(name), "findings.md"), "utf8")) as { schema: string };
+      assert.notEqual(fm.schema, "alissa-findings/v1.4", name);
+      assert.ok(validate(fm), `${name}: ${JSON.stringify(validate.errors)}`);
+    }
+    // v1.4 reads v1.3's security block and kind as written: a widening, not a fork.
+    const security = yamlOf(readFileSync(join(kbFixture("kb-k14-ok-security-review"), "findings.md"), "utf8")) as Record<string, unknown>;
+    assert.ok(validate({ ...security, schema: "alissa-findings/v1.4" }), JSON.stringify(validate.errors));
+    const plain = yamlOf(readFileSync(join(kbFixture("kb-golden"), "findings.md"), "utf8")) as Record<string, unknown>;
+    assert.ok(validate({ ...plain, schema: "alissa-findings/v1.4" }), JSON.stringify(validate.errors));
+  });
+
+  it("K15: a doc block or `kind: doc_check` before v1.4 is refused — the block by K15, the kind by K2", async () => {
+    const v13 = base().replace("schema: alissa-findings/v1.4\nkind: doc_check\n", "schema: alissa-findings/v1.3\n");
+    const f = (await offline(v13)).failures;
+    assert.deepEqual(rulesOf(f), ["K15", "K18"], said(f));
+    assert.match(said(f), /K15 question `q1` carries a `doc` block — it needs `schema: alissa-findings\/v1\.4`/);
+    const noBlocks = base().replace(/ {4}doc:\n(?: {6}.*\n| {8}.*\n)+/g, "");
+    assert.doesNotMatch(noBlocks, / doc:/);
+    const kind13 = (await offline(noBlocks.replace("schema: alissa-findings/v1.4", "schema: alissa-findings/v1.3"))).failures;
+    assert.deepEqual(rulesOf(kind13), ["K2"], said(kind13));
+    assert.match(said(kind13), /^K2 frontmatter carries `kind: doc_check` — it needs `schema: alissa-findings\/v1\.4`/m);
+    const kind12 = (await offline(noBlocks.replace("schema: alissa-findings/v1.4", "schema: alissa-findings/v1.2"))).failures;
+    assert.match(said(kind12), /^K2 frontmatter carries `kind` — it needs `schema: alissa-findings\/v1\.3` .* or, for `doc_check`, `alissa-findings\/v1\.4`/m);
+    // A file with no block may still say it is a doc check's.
+    assert.deepEqual((await offline(noBlocks)).failures, []);
+    assert.deepEqual((await offline(noBlocks.replace("kind: doc_check\n", ""))).failures, []);
+  });
+
+  it("K15: a block that fails the schema — a verdict, area, fixSide or crossRun off the list, a missing field, an oversized passage or correction — is K15, not K2", async () => {
+    for (const [from, to, why] of [
+      ["verdict: wrong", "verdict: outdated", /K15 question `q1`: frontmatter \/questions\/0\/doc\/verdict must be equal to one of the allowed values: right, wrong, stale, missing/],
+      ["area: readme\n      docRepo: example-org/service-b\n      docPath: README.md\n      anchor", "area: wiki\n      docRepo: example-org/service-b\n      docPath: README.md\n      anchor", /\/doc\/area must be equal to one of the allowed values: readme, docs, agent, api, site/],
+      ["fixSide: doc\n      crossRun: new\n    unblocks:\n      - { decision: \"Whether the README", "fixSide: both\n      crossRun: new\n    unblocks:\n      - { decision: \"Whether the README", /\/doc\/fixSide must be equal to one of the allowed values: doc, code, ask/],
+      ["crossRun: new\n    unblocks:\n      - { decision: \"Whether the README", "crossRun: still_open\n    unblocks:\n      - { decision: \"Whether the README", /\/doc\/crossRun must be equal to one of the allowed values: new, newly_drifted, still_wrong, fixed/],
+      ["      docPath: README.md\n      anchor", "      anchor", /\/questions\/0\/doc must have required property 'docPath'/],
+      ["docPath: README.md\n      anchor", "docPath: ../README.md\n      anchor", /\/doc\/docPath must match pattern/],
+      ["docRepo: example-org/service-b\n      docPath: README.md\n      anchor", "docRepo: service-b\n      docPath: README.md\n      anchor", /\/doc\/docRepo must match pattern/],
+      ["      anchor: run-locally\n", "      anchor: run-locally\n      owner: someone\n", /\/questions\/0\/doc must NOT have additional properties `owner`/],
+    ] as const) {
+      const f = (await offline(base().replace(from, to))).failures;
+      assert.deepEqual(rulesOf(f), ["K15"], `${to}: ${said(f)}`);
+      assert.match(said(f), why);
+    }
+    const passage = (await offline(base().replace("        Install the dependencies with `npm install`, then start the service with `npm run dev`.", `        ${"x".repeat(601)}`))).failures;
+    assert.deepEqual(rulesOf(passage), ["K15"], said(passage));
+    assert.match(said(passage), /\/doc\/passage must NOT have more than 600 characters/);
+    // 600 is the cap, not past it.
+    assert.deepEqual((await offline(base().replace("        Install the dependencies with `npm install`, then start the service with `npm run dev`.", `        ${"x".repeat(600)}`))).failures, []);
+    const correction = (await offline(base().replace(/( {6}correction: >-\n {8})Install/, `$1${"y".repeat(1000)} Install`))).failures;
+    assert.match(said(correction), /\/doc\/correction must NOT have more than 1000 characters/);
+  });
+
+  it("K15: the passage is quoted for every verdict but `missing`; a `right` verdict's fixSide is `doc`", async () => {
+    const noPassage = (await offline(base().replace(/ {6}passage: >-\n {8}Install[^\n]*\n/, ""))).failures;
+    assert.deepEqual(rulesOf(noPassage), ["K15"], said(noPassage));
+    assert.match(said(noPassage), /question `q1`: a `wrong` verdict carries no `passage` — the passage it judges is quoted verbatim/);
+    const missingQuoted = (await offline(base().replace("      verdict: missing\n", "      verdict: missing\n      passage: The service reads `CONFIG_PATH`.\n"))).failures;
+    assert.deepEqual(rulesOf(missingQuoted), ["K15"], said(missingQuoted));
+    assert.match(said(missingQuoted), /question `q2`: a `missing` verdict carries a `passage`/);
+    for (const side of ["code", "ask"]) {
+      const right = (await offline(base().replace("verdict: wrong", "verdict: right").replace(/fixSide: doc(\n {6}crossRun: new\n {4}unblocks:\n {6}- \{ decision: "Whether the README)/, `fixSide: ${side}$1`))).failures;
+      assert.deepEqual(rulesOf(right), ["K15"], said(right));
+      assert.match(said(right), new RegExp(`a \`right\` verdict has \`fixSide: ${side}\` — it is \`doc\``));
+    }
+    for (const v of ["wrong", "stale"]) {
+      for (const side of ["doc", "code", "ask"]) {
+        const text = base().replace("verdict: wrong", `verdict: ${v}`).replace(/fixSide: doc(\n {6}crossRun: new\n {4}unblocks:\n {6}- \{ decision: "Whether the README)/, `fixSide: ${side}$1`);
+        assert.deepEqual((await offline(text)).failures, [], `${v} ${side}`);
+      }
+    }
+    assert.deepEqual((await offline(base().replace("verdict: wrong", "verdict: right"))).failures, []);
+  });
+
+  it("K15: a question carries `security` or `doc`, never both; an answered verdict cites the code", async () => {
+    const security = "    security:\n      key: service-b.config.keys\n      severity: low\n      category: secrets\n      consequence: cosmetic\n      reachable: yes\n      scenario: >-\n        An unknown key is ignored.\n      fix: >-\n        Refuse unknown keys.\n      crossRun: new\n";
+    const both = (await offline(base().replace(q2Doc, `$1${security}`))).failures;
+    assert.ok(rulesOf(both).includes("K15"), said(both));
+    assert.match(said(both), /question `q2` carries both a `security` and a `doc` block/);
+    const keys = /      - \{ repo: example-org\/service-b, path: src\/config\/keys\.ts[^\n]*\n/;
+    const urlOnly = (await offline(base().replace(keys, "      - { kind: url, url: \"https://docs.example.com/config\", retrievedAt: \"2026-10-14T10:00:00Z\", quote: \"Every key is listed in the configuration reference.\" }\n"))).failures;
+    assert.ok(rulesOf(urlOnly).includes("K15"), said(urlOnly));
+    assert.match(said(urlOnly), /question `q2` is `answered` and carries a `doc` block but no repo cite — .*for `missing`, the uncovered code area/);
+    // A partial question is held to it too; an unanswerable one, which cites nothing, is not.
+    const partial = (await offline(base().replace(keys, "").replace(/(id: q2\n.*\n {4}status: )answered/, "$1partial").replace(/( {4}cites:\n)( {4}doc:\n {6}key: service-b\.missing)/, "$2"))).failures;
+    assert.match(said(partial), /question `q2` is `partial` and carries a `doc` block but no repo cite/);
+  });
+
+  it("K16: a key is `[a-z0-9.-]{1,80}` and unique in the file", async () => {
+    for (const bad of ["Service-B.readme.dev", "service_b.readme.dev", "x".repeat(81)]) {
+      const f = (await offline(base().replace("key: service-b.readme.npm-run-dev", `key: ${bad}`))).failures;
+      assert.deepEqual(rulesOf(f), ["K16"], `${bad}: ${said(f)}`);
+      assert.match(said(f), /the `doc\.key` `.*` is not `\[a-z0-9\.-\]\{1,80\}`/);
+    }
+    assert.deepEqual((await offline(base().replace("key: service-b.readme.npm-run-dev", `key: ${"x".repeat(80)}`))).failures, []);
+  });
+
+  it("K17: one POST to K7's verify route with each distinct passage, whitespace-normalized, at its docRepo's reads SHA", async () => {
+    api.verifyBodies.length = 0;
+    const r = await lintCase("kb-k17-ok-whitespace");
+    assert.deepEqual(r.failures, []);
+    assert.equal(api.verifyBodies.length, 2, "K7's files and K17's passages, two bodies to the one route");
+    const passages = (api.verifyBodies.find((b) => Array.isArray((b as { passages?: unknown }).passages)) as { passages: Array<Record<string, string>> }).passages;
+    assert.deepEqual(passages, [{
+      repo: "example-org/service-b", sha: KB_SHA, path: "README.md",
+      passage: "Install the dependencies with `npm install`, then start the service with `npm run dev`.",
+    }]);
+    // `missing` quotes nothing, so a file of only missing verdicts posts no passage.
+    api.verifyBodies.length = 0;
+    const onlyMissing = base().replace(/( {4}doc:\n {6}key: service-b\.readme\.npm-run-dev\n(?: {6}.*\n| {8}.*\n)+)/, "");
+    const m = await online(onlyMissing.replace(/ {2}- id: q1\n(?:.*\n)*?(?= {2}- id: q2)/, ""));
+    assert.deepEqual(m.failures, [], said(m.failures));
+    assert.ok(m.notes.includes("K17: the findings quote no doc passage"));
+    assert.ok(api.verifyBodies.every((b) => !("passages" in (b as object))));
+  });
+
+  it("K17: a paraphrase, a doc file missing at the SHA, and a docRepo not in `reads` are refused", async () => {
+    const para = await lintCase("kb-k17-verbatim-passage");
+    assert.deepEqual(para.failures.map((f) => [f.rule, f.couldNotRun === true]), [["K17", false]]);
+    const gone = (await online(base().replace("docPath: README.md\n      anchor", "docPath: docs/run.md\n      anchor"))).failures;
+    assert.deepEqual(rulesOf(gone), ["K17"], said(gone));
+    assert.match(said(gone), /`example-org\/service-b:docs\/run\.md` at 3f9c2a1 does not exist at the pinned SHA/);
+    const elsewhere = (await online(base().replace("docRepo: example-org/service-b\n      docPath: README.md\n      anchor", "docRepo: example-org/docs-site\n      docPath: README.md\n      anchor"))).failures;
+    assert.deepEqual(rulesOf(elsewhere), ["K17"], said(elsewhere));
+    assert.match(said(elsewhere), /question `q1`: `doc\.docRepo` `example-org\/docs-site` is not in `reads`/);
+  });
+
+  for (const [mode, why] of [[503, /answered 503/], ["legacy", /answered 400/], ["bad-shape", /unexpected shape/]] as const) {
+    it(`K17, route ${mode}: "plan-lint could not run", a failure and never a pass`, async () => {
+      api.verify = mode;
+      try {
+        const r = await lintCase("kb-k18-ok-doc-check");
+        const k17 = r.failures.filter((f) => f.rule === "K17");
+        assert.deepEqual(k17.map((f) => f.couldNotRun), [true], said(r.failures));
+        assert.match(k17[0]?.message ?? "", why);
+        if (mode === "legacy") assert.deepEqual(rulesOf(r.failures), ["K17"], "a route that checks files but not passages leaves K7 passing");
+        const run = await runCli(["--kb", kbFixture("kb-k18-ok-doc-check"), "--no-base"], cliEnv(api));
+        assert.equal(run.status, 3, run.stdout + run.stderr);
+      } finally {
+        api.verify = "up";
+      }
+    });
+  }
+
+  it("K18: kind: doc_check is required beside any block; a security block still needs security_review (K14)", async () => {
+    const f = (await offline(base().replace("kind: doc_check\n", "kind: security_review\n"))).failures;
+    assert.deepEqual(rulesOf(f), ["K18"], said(f));
+  });
+
+  it("the review line treats a `wrong` verdict with fixSide code as impact high, and every other verdict as not", async () => {
+    assert.deepEqual((await offline(base())).review, { level: "none", reasons: [] });
+    const code = base().replace(/fixSide: doc(\n {6}crossRun: new\n {4}unblocks:\n {6}- \{ decision: "Whether the README)/, "fixSide: code$1");
+    assert.deepEqual((await offline(code)).review, { level: "light", reasons: ["high impact: q1"] });
+    assert.deepEqual((await offline(code.replace("verdict: wrong", "verdict: stale"))).review, { level: "none", reasons: [] });
+    const dir = variantDir(code);
+    const run = await runCli(["--kb", dir, "--no-base", "--offline"]);
     assert.match(run.stdout, /^Discovery-Review: light — high impact: q1$/m);
   });
 });

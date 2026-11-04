@@ -45,6 +45,8 @@ export interface KbWorld {
   tasks: Record<string, { kind: string; createdAt: number; reads?: string; sources?: string; asker?: string; ownerId?: string }>;
   /** `<repo>@<sha>:<path>` → the blob and line count Studio's verify route reads there. */
   files: Record<string, { blob: string; lines: number }>;
+  /** `<repo>@<sha>:<path>` → a doc file's text, which K17's passages are read against (v1.4, lane DOC-3). */
+  docs?: Record<string, string>;
   /** A URL → how the page answers Studio's guarded fetch (K8): a status and its visible text, a timeout, or the guard's refusal. */
   pages?: Record<string, { status: number; text?: string } | "timeout" | "guard">;
 }
@@ -57,6 +59,8 @@ export function kbWorld(): KbWorld {
   for (const n of [1234, 1301, 1302, 1303, 1304, 1305, 1307]) tasks[`TASK-${n}`] = { ...discovery };
   // v1.3 (lane SR-2): K10–K14, one failing and one passing fixture per rule, each a discovery task of its own.
   for (const n of [1310, 1311, 1312, 1313, 1314, 1320, 1321, 1322, 1323, 1324]) tasks[`TASK-${n}`] = { ...discovery };
+  // v1.4 (lane DOC-3): K15–K18, one failing (133x) and one passing (134x) fixture per rule.
+  for (const n of [1330, 1331, 1332, 1333, 1340, 1341, 1342, 1343]) tasks[`TASK-${n}`] = { ...discovery };
   tasks["TASK-1306"] = { ...discovery, kind: "code" };
   tasks["TASK-2000"] = { kind: "design", createdAt: KB_CREATED };
   tasks["TASK-2001"] = { kind: "code", createdAt: KB_CREATED };
@@ -72,6 +76,10 @@ export function kbWorld(): KbWorld {
       [at("src/config/load.ts")]: { blob: "9ad0c1e2f3a4b5c6d7e8f90a1b2c3d4e5f6a7b8c", lines: 900 },
       [at("src/config/keys.ts")]: { blob: "51be2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c", lines: 64 },
       [at("config/.env.production")]: { blob: "9ad0c1e2f3a4b5c6d7e8f90a1b2c3d4e5f6a7b8c", lines: 900 },
+      [at("package.json")]: { blob: "7c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d", lines: 24 },
+    },
+    docs: {
+      [at("README.md")]: "# service-b\n\n## Run locally\n\nInstall the dependencies with `npm install`, then start the service with\n`npm run dev`. The service reads `CONFIG_PATH` and listens on port 3000.\n",
     },
     pages: {
       "https://docs.example.com/webhooks/retries": { status: 200, text: `Webhooks\n\n${docs}` },
@@ -92,8 +100,11 @@ export interface FakeAlissa {
   github: string;
   world: World;
   kb: KbWorld;
-  /** How the verify route answers: `up`, an HTTP status, or an answer of the wrong shape. */
-  verify: "up" | "bad-shape" | number;
+  /**
+   * How the verify route answers: `up`, an HTTP status, an answer of the wrong shape, or `legacy` — a
+   * route that checks K7's `files` but does not read K17's `passages` yet, and answers them 400.
+   */
+  verify: "up" | "bad-shape" | "legacy" | number;
   /** The bodies K7 posted. */
   verifyBodies: unknown[];
   /** How the url-cites route answers (K8): `up`, an HTTP status, or an answer of the wrong shape. */
@@ -104,8 +115,22 @@ export interface FakeAlissa {
   close(): Promise<void>;
 }
 
-/** Studio's `POST /v1/factory/repo-files/verify` (lane DS-3), as the linter expects it to answer. */
+/**
+ * Studio's `POST /v1/factory/repo-files/verify` (lane DS-3), as the linter expects it to answer: K7's
+ * `{ files }`, or K17's `{ passages }` (lane DOC-3), each passage held when the doc file's text,
+ * whitespace-normalized, contains it.
+ */
 function fakeVerify(kb: KbWorld, body: unknown): { status: number; body: unknown } {
+  const passages = (body as { passages?: unknown } | null)?.passages;
+  if (Array.isArray(passages)) {
+    const norm = (t: string): string => t.replace(/\s+/g, " ").trim();
+    const results = passages.map((p: { repo: string; sha: string; path: string; passage: string }) => {
+      const text = kb.docs?.[`${p.repo}@${p.sha}:${p.path}`];
+      if (text === undefined) return { ok: false, reason: "path_missing" };
+      return norm(text).includes(norm(p.passage)) ? { ok: true } : { ok: false, reason: "passage_missing" };
+    });
+    return { status: 200, body: { results } };
+  }
   const files = (body as { files?: unknown } | null)?.files;
   if (!Array.isArray(files)) return { status: 400, body: { error: "Bad Request", message: "files is required" } };
   const results = files.map((f: { repo: string; sha: string; path: string; blob: string; lines: string }) => {
@@ -219,6 +244,9 @@ export async function fakeAlissa(world: World = loadWorld(), kb: KbWorld = kbWor
         const mode = api?.verify ?? "up";
         if (typeof mode === "number") return send(mode, { error: "Unavailable", message: "The verify route is down." });
         if (mode === "bad-shape") return send(200, { verified: true });
+        if (mode === "legacy" && Array.isArray((parsed as { passages?: unknown } | null)?.passages)) {
+          return send(400, { error: "VALIDATION_ERROR", message: "files must be a non-empty list of { repo, sha, path, blob, lines }" });
+        }
         const out = fakeVerify(kb, parsed);
         send(out.status, out.body);
       });
