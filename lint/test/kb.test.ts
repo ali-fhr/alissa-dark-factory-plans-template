@@ -1358,7 +1358,7 @@ describe("findings v1.4 — the doc block and K15–K18 (alissa-documentation-ch
     assert.match(said(elsewhere), /question `q1`: `doc\.docRepo` `example-org\/docs-site` is not in `reads`/);
   });
 
-  for (const [mode, why] of [[503, /answered 503/], ["legacy", /answered 400/], ["bad-shape", /unexpected shape/]] as const) {
+  for (const [mode, why] of [[503, /answered 503/], ["legacy", /answered 400 .*Studio's verify route may not read `passages` yet/], ["bad-shape", /unexpected shape/]] as const) {
     it(`K17, route ${mode}: "plan-lint could not run", a failure and never a pass`, async () => {
       api.verify = mode;
       try {

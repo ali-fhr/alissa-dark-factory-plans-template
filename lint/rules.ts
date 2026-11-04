@@ -1683,6 +1683,14 @@ const PASSAGE_REASONS: Readonly<Record<string, string>> = {
 };
 
 /**
+ * What a 400 to K17's POST most likely means. As of 2026-11-04 Studio's verify route
+ * (`convex/buildKnowledge.ts` `validateVerifyFiles`) reads only `{ files }` and refuses `{ passages }`
+ * with a 400, so every online doc_check run exits 3 until Studio implements README's K17 contract.
+ * The message says so, so that an operator does not mistake the 400 for a defect in the finding.
+ */
+const PASSAGES_UNSUPPORTED = "Studio's verify route may not read `passages` yet (README, K17: the route contract Studio must implement), so no doc_check finding can pass K17 online until it does";
+
+/**
  * K17: one POST to Studio's verify route — K7's — with every distinct quoted passage, `{ passages:
  * [{ repo, sha, path, passage }] }`, the passage whitespace-normalized and the SHA the `reads` entry
  * of the block's `docRepo` (the task's `Alissa-Reads`, which K6 holds `reads` to). The route answers
@@ -1725,6 +1733,7 @@ async function kbPassages(questions: Array<Record<string, unknown>>, reads: Arra
     if (err instanceof AlissaUnavailable) return couldNot(`is unreachable: ${err.message}`);
     throw err;
   }
+  if (res.status === 400) return couldNot(`answered ${describe(res)}; ${PASSAGES_UNSUPPORTED}`);
   if (res.status !== 200) return couldNot(`answered ${describe(res)}`);
   const results = (res.body as { results?: unknown } | null)?.results;
   if (!Array.isArray(results) || results.length !== asked.length || !results.every((r) => isRecord(r) && typeof r.ok === "boolean")) {
