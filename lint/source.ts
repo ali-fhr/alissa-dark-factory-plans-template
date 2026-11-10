@@ -145,7 +145,8 @@ export function readPlanDir(dir: string, base?: string | null): PlanSource {
 
 export type PrRead =
   | { kind: "nothing"; changed: string[] }
-  | { kind: "plan"; source: PlanSource }
+  /** `reportData`: the one `report-data.json` a Report plan's PR adds beside its plan (alissa-code-security-reports §4.1). */
+  | { kind: "plan"; source: PlanSource; reportData?: KbSource }
   | { kind: "kb"; source: KbSource }
   | { kind: "ic"; source: IcSource };
 
@@ -167,14 +168,21 @@ export function readPlanFromGit(repo: string, base: string, head: string): PrRea
   for (let i = 0; i + 1 < parts.length; i += 2) changes.push({ status: parts[i] ?? "", path: parts[i + 1] ?? "" });
 
   if (changes.some((c) => c.path.startsWith(`${IC_ROOT}/`))) return { kind: "ic", source: readIcChanges(repo, base, head, changes) };
-  if (changes.some((c) => c.path.startsWith(`${KB_ROOT}/`))) return { kind: "kb", source: readKbChanges(repo, base, head, changes) };
-
   const planChanges = changes.filter((c) => c.path.startsWith("plans/"));
+  // A Report plan's PR (alissa-code-security-reports §4.1): a PR that adds a plan and touches a
+  // security report's run directory is a plan PR, which may add that directory's report-data.json.
+  const reportPlan = planChanges.some((c) => c.status === "A") && changes.some((c) => c.path.startsWith(`${SECURITY_REPORTS_ROOT}/`));
+  if (!reportPlan && changes.some((c) => c.path.startsWith(`${KB_ROOT}/`))) return { kind: "kb", source: readKbChanges(repo, base, head, changes) };
+
   if (planChanges.length === 0) return { kind: "nothing", changed: changes.map((c) => c.path) };
 
   const layout: string[] = [];
   const outside = changes.filter((c) => !c.path.startsWith("plans/"));
-  for (const c of outside) layout.push(`the diff touches \`${c.path}\` outside \`plans/\` — a plan PR touches its own new directory and nothing else`);
+  const reportData = reportPlan ? readReportPlanData(repo, base, head, outside, layout) : undefined;
+  for (const c of outside) {
+    if (reportPlan && c.path.startsWith(`${SECURITY_REPORTS_ROOT}/`)) continue; // judged by readReportPlanData
+    layout.push(`the diff touches \`${c.path}\` outside \`plans/\` — a plan PR touches its own new directory and nothing else`);
+  }
   const dirs = new Set<string>();
   for (const c of planChanges) {
     const segs = c.path.split("/");
@@ -215,7 +223,7 @@ export function readPlanFromGit(repo: string, base: string, head: string): PrRea
     if (size <= READ_CAP_BYTES) src.files.set(rel, git(repo, ["cat-file", "blob", sha]).toString("utf8"));
   }
   if (!src.sizes.has("plan.md")) layout.push("`plan.md` is missing");
-  return { kind: "plan", source: src };
+  return { kind: "plan", source: src, ...(reportData === undefined ? {} : { reportData }) };
 }
 
 function statusWord(status: string): string {
@@ -382,6 +390,52 @@ function readSecurityReportChanges(repo: string, base: string, head: string, kbC
     if (size <= READ_CAP_BYTES) src.files.set(rel, git(repo, ["cat-file", "blob", sha]).toString("utf8"));
     else src.layout.push(`\`${rel}\` is ${size} bytes — past the ${READ_CAP_BYTES}-byte read cap`);
   }
+  return src;
+}
+
+/**
+ * Rule 1 on a Report plan's PR (alissa-code-security-reports §4.1): beside its plan, the PR may add
+ * exactly one `knowledge-base/security-reports/<yyyy-mm-dd>-<reviewId>/report-data.json`, so the data
+ * file lands before any Report task starts. Every other security-report path is rule 1's finding,
+ * pushed into `layout` naming the path; the admitted file is read for K19's data-file checks, which
+ * the caller runs beside the plan's rules. A data file the base branch already holds is refused here
+ * (rule 1) and its base text kept, so K19 reports it changed after its first commit.
+ */
+function readReportPlanData(repo: string, base: string, head: string, outside: Array<{ status: string; path: string }>, layout: string[]): KbSource | undefined {
+  const reportChanges = outside.filter((c) => c.path.startsWith(`${SECURITY_REPORTS_ROOT}/`));
+  const isDataPath = (p: string): boolean => {
+    const segs = p.split("/");
+    return segs.length === 4 && segs[3] === SECURITY_REPORT_DATA_FILE;
+  };
+  const admitted = reportChanges.find((c) => isDataPath(c.path));
+  const dir = admitted === undefined ? null : admitted.path.slice(0, -`/${SECURITY_REPORT_DATA_FILE}`.length);
+  const src = emptyKb("security-report", admitted?.path ?? `${SECURITY_REPORTS_ROOT}/`);
+  for (const c of reportChanges) {
+    if (c === admitted) continue;
+    layout.push(
+      isDataPath(c.path)
+        ? `the diff touches \`${c.path}\` — a plan PR adds at most one run directory's \`${SECURITY_REPORT_DATA_FILE}\` (alissa-code-security-reports §4.1)`
+        : `the diff touches \`${c.path}\` — a plan PR adds only its run directory's \`${SECURITY_REPORT_DATA_FILE}\`; the report files come from the Report tasks' own pull requests (alissa-code-security-reports §4.1)`,
+    );
+  }
+  if (admitted === undefined || dir === null) return undefined;
+  checkSecurityReportDir(dir, src);
+  if (admitted.status !== "A") layout.push(`\`${admitted.path}\` is ${statusWord(admitted.status)} — a plan PR only adds its run directory's data file, and a data file never changes after its first commit (K19)`);
+  if (gitOk(repo, ["cat-file", "-e", `${base}:${admitted.path}`])) {
+    src.firstData = git(repo, ["cat-file", "blob", `${base}:${admitted.path}`]).toString("utf8");
+    if (admitted.status === "A") layout.push(`\`${admitted.path}\` already exists on the base branch — a data file is committed once (K19)`);
+  }
+  if (admitted.status.charAt(0) === "D") return src;
+  const rec = git(repo, ["ls-tree", "-z", "--full-tree", head, "--", admitted.path]).toString("utf8").split("\0")[0] ?? "";
+  const m = /^(\d{6}) (\w+) ([0-9a-f]+)\t/.exec(rec);
+  if (!m || m[2] !== "blob" || (m[1] !== "100644" && m[1] !== "100755")) {
+    src.layout.push(`\`${SECURITY_REPORT_DATA_FILE}\` is ${m?.[1] === "120000" ? "a symbolic link" : m?.[2] === "commit" ? "a submodule" : "not a regular file"} — ${SECURITY_REPORT_HOLDS}`);
+    return src;
+  }
+  const size = Number(git(repo, ["cat-file", "-s", m[3] as string]).toString("utf8").trim());
+  src.sizes.set(SECURITY_REPORT_DATA_FILE, size);
+  if (size <= READ_CAP_BYTES) src.files.set(SECURITY_REPORT_DATA_FILE, git(repo, ["cat-file", "blob", m[3] as string]).toString("utf8"));
+  else src.layout.push(`\`${SECURITY_REPORT_DATA_FILE}\` is ${size} bytes — past the ${READ_CAP_BYTES}-byte read cap`);
   return src;
 }
 

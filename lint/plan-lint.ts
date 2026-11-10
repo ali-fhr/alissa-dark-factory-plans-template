@@ -20,7 +20,9 @@
 // `critical` or `high` security block, or a `wrong` doc verdict with `fixSide: code`, counts as impact
 // `high`. A pull request that changes a Code Security report's run directory,
 // knowledge-base/security-reports/<yyyy-mm-dd>-<reviewId>/, is linted under K1 (from a `kind: design` task,
-// read online) and K19–K23, offline (design alissa-code-security-reports §4.3). A pull request that changes
+// read online) and K19–K23, offline (design alissa-code-security-reports §4.3). A Report plan's PR — one that
+// adds a plan and touches a run directory — is a plan PR instead: beside its plan it may add exactly one
+// run directory's report-data.json, linted with K19's data-file checks in the same run (§4.1). A pull request that changes
 // any integration-check/** file is linted in the integration-check mode, I1–I9 (design
 // alissa-build-integration-check §3.5): I1, I2 and I4–I8 offline, I3 and I9 read Alissa; --ic runs
 // the same rules over a local run directory.
@@ -38,7 +40,7 @@ import {
 } from "./render.ts";
 import {
   type IcLintOptions, type IcLintResult, I_RULE_NAMES, type KbLintOptions, type KbLintResult, K_RULE_NAMES, type LintResult, kRulesRan, RULE_NAMES, lint, lintIc, lintKb,
-  discoveryReviewLine, planTaskView, taskOfBranch,
+  discoveryReviewLine, lintReportData, planTaskView, taskOfBranch,
 } from "./rules.ts";
 import { type PlanSource, UsageError, isTaskPath, readIcDir, readKbDir, readPlanDir, readPlanFromGit } from "./source.ts";
 
@@ -111,6 +113,37 @@ export function report(r: LintResult): Report {
     : infra ? `plan-lint could not run — rule ${infra.rule} (${RULE_NAMES[infra.rule]}) — ${r.plan}`
     : `PASS — ${r.plan} — plan class ${r.planClass ?? "none"}${warned}`;
   return { conclusion: r.failures.length > 0 ? "failure" : "success", title, summary: md.join("\n"), lines, ...(infra ? { couldNotRun: true } : {}) };
+}
+
+/**
+ * A Report plan's PR (alissa-code-security-reports §4.1): the plan's report and its one data file's
+ * K19 verdict, both named in the lines, the check's title and its summary. The PR fails when either
+ * fails; a refusal is the verdict over a plan that could not run, as in `report`, and the data file's
+ * checks are offline, so they always run.
+ */
+export function reportWithData(plan: Report, data: KbLintResult): Report {
+  const fmt = (f: { rule: keyof typeof K_RULE_NAMES; file?: string; message: string }): string =>
+    `${f.rule} (${K_RULE_NAMES[f.rule]})${f.file ? ` — ${f.file}` : ""}: ${f.message}`;
+  const first = data.failures[0];
+  const ran = kRulesRan(data.rulesRun);
+  const lines = [...plan.lines, `plan-lint: data file ${data.target} — K19's data-file checks — ${ran}`];
+  if (first) {
+    lines.push(`plan-lint: data file FAIL ${fmt(first)}`);
+    for (const f of data.failures.slice(1)) lines.push(`plan-lint:   also ${fmt(f)}`);
+  } else lines.push("plan-lint: data file PASS");
+  for (const n of data.notes) lines.push(`plan-lint:   note: ${n}`);
+
+  const md = [plan.summary, "", `**Data file** · \`${data.target}\` · K19's data-file checks · ${ran}`, "", first ? `**FAIL — ${fmt(first)}**` : "**PASS**"];
+  if (data.failures.length > 1) md.push("", "Every data-file finding, in rule order:", "", ...data.failures.map((f) => `- ${fmt(f)}`));
+  if (data.notes.length > 0) md.push("", "Notes:", "", ...data.notes.map((n) => `- ${n}`));
+
+  const dataVerdict = first ? `data file FAIL — ${first.rule} (${K_RULE_NAMES[first.rule]})` : "data file PASS";
+  const planRefused = plan.conclusion === "failure" && plan.couldNotRun !== true;
+  const title = first && !planRefused
+    ? `FAIL — ${first.rule} (${K_RULE_NAMES[first.rule]}) — ${data.target} — plan ${plan.conclusion === "success" ? "PASS" : "could not run"}`
+    : `${plan.title} — ${dataVerdict}`;
+  const couldNotRun = plan.couldNotRun === true && !first;
+  return { conclusion: plan.conclusion === "success" && !first ? "success" : "failure", title, summary: md.join("\n"), lines, ...(couldNotRun ? { couldNotRun: true } : {}) };
 }
 
 /**
@@ -246,7 +279,10 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
       if (read.kind === "nothing") out = nothingToLint(read.changed.length);
       else if (read.kind === "kb") out = reportKb(await lintKb(read.source, kbOptionsFor(values.offline === true, env, prTask)));
       else if (read.kind === "ic") out = reportIc(await lintIc(read.source, icOptionsFor(values.offline === true, env, prTask)));
-      else out = report(await lint(read.source, readerFor(values.offline === true, env)));
+      else {
+        const plan = report(await lint(read.source, readerFor(values.offline === true, env)));
+        out = read.reportData === undefined ? plan : reportWithData(plan, lintReportData(read.reportData));
+      }
     } else if (values.ic !== undefined) {
       if (values.write || values.kb !== undefined || positionals.length > 0 || values.head || values.repo) throw new UsageError("--ic takes one run directory and no --write, --kb, --head, --repo or other directory");
       const source = readIcDir(values.ic, values["no-base"] ? null : values.base);

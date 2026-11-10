@@ -213,7 +213,7 @@ The rules — §5.5's twelve, plus rule 5b of the operator-surface design (`docs
 
 | Rule | Name | Refuses | Reads |
 |---|---|---|---|
-| 1 | layout and immutability | anything in the plan directory but `plan.md` and `tasks/<id>.md`; a bad directory name; a plan directory already on the default branch; a PR diff outside its one new plan directory | git |
+| 1 | layout and immutability | anything in the plan directory but `plan.md` and `tasks/<id>.md`; a bad directory name; a plan directory already on the default branch; a PR diff outside its one new plan directory — save one added `knowledge-base/security-reports/<yyyy-mm-dd>-<reviewId>/report-data.json` beside a plan, judged by K19's data-file checks (*Code Security reports*, below) | git |
 | 2 | frontmatter | frontmatter that does not split, parse or validate against `schema/` — including, from task schema v1.1, a `kind` other than `code`/`design`, a dependency `type` other than `hard`/`soft`/`acceptance`, and a `new` entry that is not also in `scope`; a plan `id` or task file name that is not its directory's or `id`'s | — |
 | 3 | count | fewer than 1 or more than 8 task files | — |
 | 4 | graph | a `dependsOn.id` that names no task of the plan, a self-edge, a duplicate, a cycle, more than one external `TASK-<n>` | — |
@@ -277,7 +277,9 @@ kind: code            # optional, code | design (default code)
 - **`--pr --base <rev> --head <rev>`** is the CI mode: it lints what the pull request changed,
   reading every file of `plans/**`, `knowledge-base/**` and `integration-check/**` from git objects
   as data. Any `integration-check/**` change selects the integration-check mode (below); otherwise
-  any `knowledge-base/**` change selects the knowledge-base mode (below); otherwise a `plans/**`
+  a pull request that adds a `plans/**` file and touches `knowledge-base/security-reports/**` is a
+  Report plan's pull request, linted as a plan with its one data file (*Code Security reports*,
+  below); otherwise any `knowledge-base/**` change selects the knowledge-base mode (below); otherwise a `plans/**`
   change is a plan, and a pull request that changes none of the three succeeds with *nothing to lint*.
 
 **The workflow** (`.github/workflows/plan-lint.yml`) runs on every pull request, with no path
@@ -524,9 +526,17 @@ review's creation day (UTC):
 
 - **`report-data.json` is Studio's**, written by `securityReportDataOf` and committed once, before the
   run directory's report files: sorted keys, two-space indent, a final newline, no exploit scenario, fix
-  or cite line range. Today the lint admits it only through a `kind: design` task's pull request (K1).
-  A plan PR still never touches `knowledge-base/` (§5.5 rule 1), so design §4.1's "committed by the
-  Report plan's PLAN- PR" is refused here. Which side moves is open under TASK-883979134. It is the only source of numbers and refs, and it decides which technical file covers
+  or cite line range. It is committed by the Report plan's `PLAN-` pull request, beside the plan, so
+  it lands before any Report task starts (design §4.1, lane CSR-2b): a pull request that adds a plan
+  may add exactly one `knowledge-base/security-reports/<yyyy-mm-dd>-<reviewId>/report-data.json`,
+  and the linter judges it with K19's data-file checks (schema, arithmetic, canonical form, the run
+  directory's name, never changed after its first commit) in the same run as the plan's rules. The
+  check names both verdicts — `plan-lint: data file PASS` on stdout, `… — data file PASS` in the
+  title, a *Data file* section in the summary — and the pull request fails when either fails. A data
+  file that is modified or already on the base branch, a second data file, or any `summary.md` or
+  `technical-*.md` beside it is rule 1's finding, naming the path; every other `knowledge-base/**`
+  path in a plan PR stays refused under rule 1 as before. The Report tasks' later pull requests keep
+  K1's route below, reading the merged data file as the base branch holds it. It is the only source of numbers and refs, and it decides which technical file covers
   each finding (`file`). Its schema is `schema/security-report-data.v1.json`
   (`alissa-security-report-data/v1`); K19 also checks its arithmetic, its bytes and that it never
   changes.
@@ -608,7 +618,8 @@ review's creation day (UTC):
   lacks `alissa-findings/v1.3` and `K10`–`K14` lints no `security` block; one whose stamp lacks
   `alissa-findings/v1.4` and `K15`–`K18` lints no `doc` block; one whose stamp lacks
   `security-report-schemas: alissa-security-report-data/v1 alissa-security-report/v1` and `K19`–`K23`
-  lints no security report.
+  lints no security report; one whose stamp lacks `security-report-plan-data: report-data.json`
+  refuses a Report plan's data file in its `PLAN-` pull request (lane CSR-2b).
   `lint/test/kb.test.ts` keeps the stamp in step with the schemas and the rules.
 - **Rollout.** The template changes new plans repositories only; the provisioner never overwrites
   an adopted one. Until an existing repository is upgraded — by an ordinary `TASK-` lane in that
