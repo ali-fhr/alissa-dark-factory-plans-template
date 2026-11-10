@@ -1,6 +1,7 @@
 // The twelve rules of design §5.5, and rule 5b of loop-operator-surface §2.12 (L12), evaluated in
 // order over one plan. Every rule runs (so a fixture can prove it fails exactly one); the verdict is
 // the first failure, with its rule named.
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { isIP } from "node:net";
 import AjvModule, { type ErrorObject, type ValidateFunction } from "ajv";
@@ -12,7 +13,7 @@ import {
   DAG_BEGIN, DAG_END, SUMMARY_BEGIN, SUMMARY_END, isRecord, oneLine, readRegion, renderDag, renderSummary, taskView, type TaskView,
 } from "./render.ts";
 import {
-  EVIDENCE_DIR, FINDINGS_FILE, type IcSource, KB_EVIDENCE_READ_CAP, KB_EVIDENCE_TYPES, type KbSource, type PlanSource, REPORT_FILE, extensionOf, isKbTextEvidence, isTaskPath,
+  EVIDENCE_DIR, FINDINGS_FILE, type IcSource, KB_EVIDENCE_READ_CAP, KB_EVIDENCE_TYPES, type KbSource, type PlanSource, REPORT_FILE, SECURITY_REPORT_DATA_FILE, extensionOf, isKbTextEvidence, isTaskPath,
 } from "./source.ts";
 
 /** A §5.5 rule number, or `5b` — the scope-path preflight, which runs with the online rules. */
@@ -685,7 +686,7 @@ function sortFailures(f: Failure[]): Failure[] {
 // K1–K5 — holds every file and every `evidence:<file>` cite to each other.
 
 export type KRule = "K1" | "K2" | "K3" | "K4" | "K5" | "K6" | "K7" | "K8" | "K9" | "K10" | "K11" | "K12" | "K13" | "K14"
-  | "K15" | "K16" | "K17" | "K18";
+  | "K15" | "K16" | "K17" | "K18" | "K19" | "K20" | "K21" | "K22" | "K23";
 
 export const K_RULE_NAMES: Readonly<Record<KRule, string>> = {
   K1: "layout and immutability",
@@ -706,6 +707,11 @@ export const K_RULE_NAMES: Readonly<Record<KRule, string>> = {
   K16: "doc key",
   K17: "verbatim passage",
   K18: "doc file",
+  K19: "report shape",
+  K20: "report numbers",
+  K21: "report refs",
+  K22: "report status",
+  K23: "report exposure",
 };
 
 /** The rules a run made, as the report names them: `K1–K5, K9`, `K1–K9`, `K1, K5`. */
@@ -1130,7 +1136,7 @@ export interface DiscoveryReview {
 
 export interface KbLintResult {
   target: string;
-  kind: "findings" | "assessment";
+  kind: KbSource["kind"];
   questionCount: number;
   failures: KbFailure[];
   rulesRun: KRule[];
@@ -1289,24 +1295,37 @@ export async function lintKb(src: KbSource, opts: KbLintOptions): Promise<KbLint
   // K1 — layout and immutability (found by the reader).
   for (const m of src.layout) fail("K1", m);
 
-  if (src.kind === "assessment") {
-    // K1's online half: the one assessments/*.md file is admitted only from a design task (§7.1).
+  // K1's online half: an assessment, or a security report's files, are admitted only from a design task
+  // (discovery §7.1; alissa-code-security-reports §3.2, §4.3).
+  const designTaskCheck = async (what: string, adds: string): Promise<void> => {
     const task = opts.prTask ?? null;
     if (!opts.online) notes.push("K1's design-task check not run (offline)");
-    else if (task === null) fail("K1", "an assessment is admitted only from a `kind: design` task, and this run names none (a `TASK-<n>-…` branch or --task)");
+    else if (task === null) fail("K1", `${what} is admitted only from a \`kind: design\` task, and this run names none (a \`TASK-<n>-…\` branch or --task)`);
     else {
       try {
         const res = await opts.reader.get(`/v1/tasks/${encodeURIComponent(task)}`);
         if (res.status !== 200) fail("K1", `could not read the PR's task \`${task}\`: ${describe(res)}`);
         else {
           const kind = (res.body as { task?: { kind?: unknown } })?.task?.kind ?? "code";
-          if (kind !== "design") fail("K1", `the PR's task \`${task}\` is \`kind: ${clean(kind)}\` — only a design task adds a \`knowledge-base/assessments/*.md\` file (§7.1)`);
+          if (kind !== "design") fail("K1", `the PR's task \`${task}\` is \`kind: ${clean(kind)}\` — only a design task ${adds}`);
         }
       } catch (err) {
         if (err instanceof AlissaUnavailable) fail("K1", `could not verify the PR's task \`${task}\`: ${err.message}`);
         else throw err;
       }
     }
+  };
+
+  if (src.kind === "security-report") {
+    await designTaskCheck("a security report", "adds files to a `knowledge-base/security-reports/<yyyy-mm-dd>-<reviewId>/` directory (alissa-code-security-reports §3.2)");
+    // K19–K23 — offline, on the run directory as it will stand.
+    for (const f of securityReportLint({ files: src.files, firstData: src.firstData ?? null, day: src.day, reviewId: src.reviewId ?? null })) failures.push(f);
+    notes.push("a security report: K2–K18 apply to findings only; K19–K23 read the run directory's report-data.json");
+    return result(["K1", ...SECURITY_REPORT_RULES]);
+  }
+
+  if (src.kind === "assessment") {
+    await designTaskCheck("an assessment", "adds a `knowledge-base/assessments/*.md` file (§7.1)");
     // K5 — the assessment's text is scanned like a finding's.
     for (const [file, text] of src.files) {
       const lines = secretShapedLines(text);
@@ -2032,6 +2051,515 @@ async function kbUrlCites(cites: UrlCite[], verifier: AlissaPoster, fail: KbFail
 
 function sortKb(f: KbFailure[]): KbFailure[] {
   return f.map((x, i) => ({ x, i })).sort((a, b) => Number(a.x.rule.slice(1)) - Number(b.x.rule.slice(1)) || a.i - b.i).map(({ x }) => x);
+}
+
+// ── K19–K23: a Code Security report's run directory (design alissa-code-security-reports §4.1–§4.4, lane CSR-2)
+// A pull request that touches `knowledge-base/security-reports/<yyyy-mm-dd>-<reviewId>/` is a Report
+// task's (a `kind: design` task, K1's online half, as for an assessment). Studio's numbers are the
+// source of truth: `report-data.json` is Studio's, committed once, and the prose may say less than it
+// but never more, and never something else. Offline, every one. These rules are the port of Studio's
+// `securityReportLintOf` (studio.alissa.app `convex/core/securityReportData.ts`, lane CSR-1) and are
+// tested on its fixtures, copied byte for byte into `fixtures/security-report/`; Studio re-runs the
+// same rules before it imports a report (§4.4), so a change here is a change there.
+
+export const SECURITY_REPORT_RULES: readonly KRule[] = ["K19", "K20", "K21", "K22", "K23"];
+export const SECURITY_REPORT_DATA_SCHEMA = "alissa-security-report-data/v1";
+export const SECURITY_REPORT_FILE_SCHEMA = "alissa-security-report/v1";
+const SECURITY_REPORT_SUMMARY_FILE = "summary.md";
+const SECURITY_REPORT_CHAINS_FILE = "technical-chains.md";
+const SECURITY_REPORT_TECHNICAL_RE = /^technical-[a-z0-9]+(?:-[a-z0-9]+)*\.md$/;
+const SECURITY_STATUSES = ["new", "still_open", "fixed", "regressed"] as const;
+type SecurityStatus = (typeof SECURITY_STATUSES)[number];
+type SecurityReportLang = "en" | "es-MX";
+
+interface ReportFinding {
+  ref: string; refs: string[]; key: string; title: string; severity: SecuritySeverity; category: string; repos: string[];
+  chain: string | null; consequence: string; reachable: string; status: SecurityStatus; verification: "kept" | "not_reverified";
+  codeRemoved: boolean; file: string;
+}
+interface ReportRefuted { ref: string; finding: string; key: string; title: string; severity: SecuritySeverity; reason: string; file: string }
+interface ReportData {
+  schema: string;
+  review: { id: string; projectId: string; day: string; lang: SecurityReportLang; templateVersion: number; previousReviewId: string | null };
+  repos: Array<{ repo: string; slug: string; notes: Array<{ kind: "fork"; parent: string } | { kind: "public" }> }>;
+  verifyFiles: Array<{ task: string; path: string }>;
+  counts: {
+    findings: number; kept: number; notReverified: number; refuted: number; couldntVerify: number; notTraced: number; openCriticalHigh: number;
+    bySeverity: Record<SecuritySeverity, number>; byStatus: Record<SecurityStatus, number>;
+  };
+  findings: ReportFinding[];
+  refuted: ReportRefuted[];
+  couldntVerify: Array<{ ref: string; kind: string; what: string }>;
+  notTraced: Array<{ repo: string; reason: string }>;
+  diff: { basis: "computed" | "declared" } & Record<SecurityStatus, string[]>;
+  files: string[];
+}
+
+let reportValidators: { data: ValidateFunction; file: ValidateFunction } | null = null;
+
+/** `schema/security-report-data.v1.json` and `schema/security-report.v1.json`, compiled once. */
+export function securityReportSchemas(): { data: ValidateFunction; file: ValidateFunction } {
+  if (!reportValidators) {
+    const ajv = new Ajv({ allErrors: true, strict: true, strictTypes: false });
+    const load = (name: string): object => JSON.parse(readFileSync(new URL(`../schema/${name}`, import.meta.url), "utf8")) as object;
+    reportValidators = { data: ajv.compile(load("security-report-data.v1.json")), file: ajv.compile(load("security-report.v1.json")) };
+  }
+  return reportValidators;
+}
+
+function reportSchemaMessage(e: ErrorObject): string {
+  const where = e.instancePath === "" ? "(root)" : e.instancePath;
+  if (e.keyword === "false schema") return `${where} is not allowed on this kind of report file (a summary carries \`links\`; a technical file \`repo\`, \`covers\` and \`suggestedTasks\`)`;
+  const extra =
+    e.keyword === "additionalProperties" ? ` \`${clean((e.params as { additionalProperty: string }).additionalProperty)}\``
+    : e.keyword === "enum" ? `: ${(e.params as { allowedValues: unknown[] }).allowedValues.join(", ")}`
+    : e.keyword === "const" ? `: \`${clean((e.params as { allowedValue: unknown }).allowedValue)}\``
+    : "";
+  return `${where} ${e.message ?? e.keyword}${extra}`;
+}
+
+/** The schema's errors worth saying: an `if` failure only repeats its `then`'s, and a `oneOf`/`anyOf` its branches'. */
+function reportSchemaErrors(errors: ErrorObject[] | null | undefined): string[] {
+  return [...new Set((errors ?? []).filter((e) => e.keyword !== "if").map(reportSchemaMessage))];
+}
+
+/** `owner/name` → `owner-name`, lowercase, every run of `[^a-z0-9]` one `-` (§4.1). */
+export const securityReportRepoSlugOf = (repo: string): string => repo.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+const technicalFileOf = (repo: string): string => `technical-${securityReportRepoSlugOf(repo)}.md`;
+
+/** A deep copy whose object keys are in code-unit order; arrays keep their order. */
+function sortedKeys<T>(x: T): T {
+  if (Array.isArray(x)) return x.map(sortedKeys) as T;
+  if (x !== null && typeof x === "object") {
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(x as object).sort()) out[k] = sortedKeys((x as Record<string, unknown>)[k]);
+    return out as T;
+  }
+  return x;
+}
+
+/** The data file's canonical bytes, as Studio writes them: sorted keys, two-space indent, a final newline. */
+export function securityReportDataJsonOf(data: unknown): string {
+  return `${JSON.stringify(sortedKeys(data), null, 2)}\n`;
+}
+
+/**
+ * The data file's errors beyond its schema, [] when it holds together: `refs` starting with `ref`,
+ * every repository a reviewed one with its own slug, every technical file covering a row, and the
+ * arithmetic between `counts` and the lists (Studio's `securityReportDataErrors`).
+ */
+function reportDataArithmetic(x: ReportData): string[] {
+  const errors: string[] = [];
+  const reviewed = x.repos.map((r) => r.repo);
+  x.repos.forEach((r, i) => {
+    if (r.slug !== securityReportRepoSlugOf(r.repo)) errors.push(`repos[${i}].slug: must be \`${securityReportRepoSlugOf(r.repo)}\``);
+  });
+  const files = new Set(x.files);
+  const covering = new Set<string>();
+  const fileOf = (f: string, at: string): void => {
+    covering.add(f);
+    if (!files.has(f)) errors.push(`${at}: \`${f}\` is not in \`files\``);
+  };
+  x.findings.forEach((f, i) => {
+    if (f.refs[0] !== f.ref) errors.push(`findings[${i}].refs: must start with \`ref\``);
+    f.repos.forEach((r, j) => {
+      if (!reviewed.includes(r)) errors.push(`findings[${i}].repos[${j}]: \`${clean(r)}\` is not a reviewed repository`);
+    });
+    fileOf(f.file, `findings[${i}].file`);
+  });
+  x.refuted.forEach((r, i) => fileOf(r.file, `refuted[${i}].file`));
+  for (const f of files) if (f !== SECURITY_REPORT_SUMMARY_FILE && !covering.has(f)) errors.push(`files: \`${f}\` covers no finding or refuted row`);
+  const c = x.counts;
+  const notReverified = x.findings.filter((f) => f.verification === "not_reverified").length;
+  const eq = (k: keyof ReportData["counts"], want: number): void => {
+    if (c[k] !== want) errors.push(`counts.${k}: ${String(c[k])}, but the data holds ${want}`);
+  };
+  eq("findings", x.findings.length);
+  eq("notReverified", notReverified);
+  eq("kept", x.findings.length - notReverified);
+  eq("refuted", x.refuted.length);
+  eq("couldntVerify", x.couldntVerify.length);
+  eq("notTraced", x.notTraced.length);
+  for (const st of SECURITY_STATUSES) {
+    if (c.byStatus[st] !== x.diff[st].length) errors.push(`counts.byStatus.${st}: ${c.byStatus[st]}, but diff.${st} lists ${x.diff[st].length}`);
+  }
+  const sevSum = SECURITY_SEVERITIES.reduce((n, s) => n + c.bySeverity[s], 0);
+  const statusSum = SECURITY_STATUSES.reduce((n, s) => n + c.byStatus[s], 0);
+  if (sevSum !== statusSum) errors.push(`counts: bySeverity sums to ${sevSum} and byStatus to ${statusSum}`);
+  if (c.openCriticalHigh > c.bySeverity.critical + c.bySeverity.high) errors.push("counts.openCriticalHigh: more than the critical and high findings");
+  return errors;
+}
+
+// ── Copy (§10), the counts table and the badge: the same renderings as Studio's ──
+
+const REPORT_COPY = {
+  en: {
+    glance: "At a glance",
+    count: "Count",
+    findings: "Findings",
+    severities: { critical: "Critical", high: "High", medium: "Medium", low: "Low" } as Record<SecuritySeverity, string>,
+    openCriticalHigh: "Open critical and high",
+    notReverified: "Not re-verified",
+    refuted: "Refuted",
+    couldntVerify: "Couldn't verify",
+    notTraced: "Not traced",
+    statusWord: "Status",
+    statuses: { new: "New", still_open: "Still open", fixed: "Fixed", regressed: "Regressed" } as Record<SecurityStatus, string>,
+    kept: "kept",
+    repositoryNotes: "Repository notes",
+  },
+  "es-MX": {
+    glance: "En resumen",
+    count: "Cantidad",
+    findings: "Hallazgos",
+    severities: { critical: "Crítica", high: "Alta", medium: "Media", low: "Baja" } as Record<SecuritySeverity, string>,
+    openCriticalHigh: "Críticos y altos abiertos",
+    notReverified: "Sin volver a verificar",
+    refuted: "Descartados",
+    couldntVerify: "No pudimos verificar",
+    notTraced: "No rastreado",
+    statusWord: "Estado",
+    statuses: { new: "Nuevo", still_open: "Sigue abierto", fixed: "Corregido", regressed: "Reapareció" } as Record<SecurityStatus, string>,
+    kept: "mantenido",
+    repositoryNotes: "Notas de los repositorios",
+  },
+} as const;
+
+/**
+ * §2.1's At a glance table in the data file's language — Studio's `securityReportCountsTableOf`,
+ * the one rendering the summary copies verbatim and K20 compares byte for byte. No trailing newline.
+ */
+export function securityReportCountsTableOf(data: Pick<ReportData, "review" | "counts">): string {
+  const c = REPORT_COPY[data.review.lang] ?? REPORT_COPY.en;
+  const n = data.counts;
+  const rows: Array<[string, number]> = [
+    [c.findings, n.findings],
+    ...SECURITY_SEVERITIES.map((s): [string, number] => [c.severities[s], n.bySeverity[s]]),
+    [c.openCriticalHigh, n.openCriticalHigh],
+    [c.notReverified, n.notReverified],
+    [c.refuted, n.refuted],
+    [c.couldntVerify, n.couldntVerify],
+    [c.notTraced, n.notTraced],
+  ];
+  return [`| ${c.glance} | ${c.count} |`, "|---|---:|", ...rows.map(([label, v]) => `| ${label} | ${v} |`)].join("\n");
+}
+
+/** §10's status badge of a finding section (K22): `Status: <status> · <kept / Not re-verified>`. */
+export function securityReportBadgeOf(f: Pick<ReportFinding, "status" | "verification">, lang: SecurityReportLang): string {
+  const c = REPORT_COPY[lang] ?? REPORT_COPY.en;
+  return `${c.statusWord}: ${c.statuses[f.status]} · ${f.verification === "not_reverified" ? c.notReverified : c.kept}`;
+}
+
+/** The `TASK-<n>#<question id>` refs a text names, in order, each once (Studio's `refsNamedIn`). */
+const REPORT_REF_RE = /TASK-\d+#[A-Za-z0-9][A-Za-z0-9._-]*/g;
+export const refsNamedIn = (text: string): string[] => [...new Set((text.match(REPORT_REF_RE) ?? []).map((m) => m.replace(/[._-]+$/, "")))];
+
+// K20's count nouns (§10), each with the counts a numeral beside it may state. A severity noun reads
+// that severity's table count or its open count (the data file's `findings` with that severity): the
+// table counts diff entries, a re-run's fixed and absent ones included, so "1 critical finding is
+// open" is true when one critical is open and another was fixed.
+type CountKey = "findings" | "kept" | "notReverified" | SecuritySeverity | `open:${SecuritySeverity}` | "refuted" | "open" | "openCriticalHigh" | "repositories";
+type NounKind = "severity" | "open" | "refuted" | "findings" | "repositories";
+const sevNoun = (s: SecuritySeverity, words: string): [RegExp, readonly CountKey[], NounKind] => [new RegExp(`^(${s}(-severity)?|${words})$`), [s, `open:${s}`], "severity"];
+const COUNT_NOUNS: ReadonlyArray<[RegExp, readonly CountKey[], NounKind]> = [
+  [/^(findings?|hallazgos?)$/, ["findings", "kept", "notReverified"], "findings"],
+  sevNoun("critical", "cr[ií]tic[oa]s?"),
+  sevNoun("high", "alt[oa]s?"),
+  sevNoun("medium", "medi[oa]s?"),
+  sevNoun("low", "baj[oa]s?"),
+  [/^(refuted|descartad[oa]s?)$/, ["refuted"], "refuted"],
+  [/^(open|abiert[oa]s?)$/, ["open", "openCriticalHigh"], "open"],
+  [/^(repositor(y|ies)|repositorios?)$/, ["repositories"], "repositories"],
+];
+// In a count-noun phrase ("open critical findings", "hallazgos críticos"), the qualifier decides.
+const NOUN_PRECEDENCE: readonly NounKind[] = ["severity", "open", "refuted", "findings", "repositories"];
+const NUMBER_WORDS: Readonly<Record<string, number>> = Object.fromEntries([
+  ..."zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty".split(" ").map((w, i) => [w, i]),
+  ..."cero uno dos tres cuatro cinco seis siete ocho nueve diez once doce trece catorce quince dieciséis diecisiete dieciocho diecinueve veinte".split(" ").map((w, i) => [w, i]),
+]);
+const K20_WINDOW = 4;
+const stripToken = (t: string): string => t.toLowerCase().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
+
+/**
+ * K20 on one prose line. A numeral within four words of a count noun, in the same clause (`,` `;`
+ * `:` `.` `!` `?` `(` `)` and dashes end one), is read against the NEAREST such noun (the following
+ * one on a tie) and the count nouns right next to it on the same side (its phrase); the phrase's
+ * qualifier decides — a severity, then open, then refuted, then the noun itself — in either word
+ * order: "two critical findings" and "dos hallazgos críticos" read critical, "5 findings across 2
+ * repositories" reads findings, then repositories. A clause naming both critical and high also
+ * admits the open critical and high count. "one of the …", "2 de los …" is a part, which says less.
+ */
+function k20Line(line: string, counts: Record<CountKey, number>): string | null {
+  const raw = line.split(/\s+/).filter(Boolean);
+  const words = raw.map(stripToken);
+  const clause: number[] = [];
+  let c = 0;
+  raw.forEach((t, i) => {
+    if (/^[(—–-]/.test(t) || /^[—–-]+$/.test(t)) c += 1;
+    clause[i] = c;
+    if (/[,;:.!?)—–]$/.test(t)) c += 1;
+  });
+  for (let i = 0; i < words.length; i += 1) {
+    const w = words[i] as string;
+    const n = /^\d+$/.test(w) ? Number(w) : NUMBER_WORDS[w];
+    if (n === undefined) continue;
+    if (words[i + 1] === "of" || words[i + 1] === "de") continue;
+    const nounAt = (j: number): (typeof COUNT_NOUNS)[number] | undefined =>
+      j >= 0 && j < words.length && j !== i && clause[j] === clause[i] ? COUNT_NOUNS.find(([re]) => re.test(words[j] as string)) : undefined;
+    let best: { d: number; j: number } | null = null;
+    const inWindow = new Set<CountKey>();
+    for (let j = Math.max(0, i - K20_WINDOW); j <= Math.min(words.length - 1, i + K20_WINDOW); j += 1) {
+      const hit = nounAt(j);
+      if (!hit) continue;
+      hit[1].forEach((k) => inWindow.add(k));
+      const d = Math.abs(j - i);
+      if (!best || d < best.d || (d === best.d && j > i)) best = { d, j };
+    }
+    if (!best) continue;
+    const nearest = best;
+    // The phrase: the count nouns adjacent to the nearest one, never across the numeral.
+    const phrase = [nounAt(nearest.j) as (typeof COUNT_NOUNS)[number]];
+    for (const step of [-1, 1]) {
+      for (let j = nearest.j + step; (j - i) * (nearest.j - i) > 0; j += step) {
+        const hit = nounAt(j);
+        if (!hit) break;
+        phrase.push(hit);
+      }
+    }
+    const head = NOUN_PRECEDENCE.map((kind) => phrase.find((p) => p[2] === kind)).find((p) => p !== undefined) as (typeof COUNT_NOUNS)[number];
+    const read: CountKey[] = [...head[1], ...(inWindow.has("critical") && inWindow.has("high") ? (["openCriticalHigh"] as const) : [])];
+    if (!read.some((k) => counts[k] === n)) return `"${clean(w)}" beside ${read.join(" / ")} is not the data file's count (${read.map((k) => `${k} ${counts[k]}`).join(", ")})`;
+  }
+  return null;
+}
+
+const NOTES_HEADING = new RegExp(`^#{1,6}\\s+(${REPORT_COPY.en.repositoryNotes}|${REPORT_COPY["es-MX"].repositoryNotes})\\s*$`, "i");
+const NOT_REVERIFIED_WORDS = /not re-verified|sin volver a verificar/gi;
+const UPGRADE_WORDS = /(?<![\p{L}-])(kept|confirmed|verified|confirmad[oa]s?|verificad[oa]s?|mantenid[oa]s?)(?![\p{L}-])/iu;
+const OPEN_WORDS = /(?<![\p{L}-])(open|still open|abiert[oa]s?|sigue abiert[oa])(?![\p{L}-])/iu;
+const CODE_FENCE = /^\s*(```|~~~)/;
+// `<file>.<ext>:<line>`: a path before it adds nothing to whether a line holds a cite, and leaving it
+// (and a lookbehind) out keeps the match linear, even on a 160k-character `a.a.a.` line.
+const PATH_LINE_CITE = /\w\.[A-Za-z0-9]+:\d+/;
+const CODE_REPO_LINK = /https?:\/\/(?:www\.)?(?:github\.com|gitlab\.com|bitbucket\.org)\//i;
+const EXPOSURE_HEADING = /^#{1,6}\s+(scenario|fix|escenario|correcci[oó]n)\s*$/i;
+const SECURITY_BLOCK = /^\s*security\s*:/;
+const PUBLIC_ACK = /Alissa-Public-Ack/i;
+// K5's token shapes (Studio's REPO_TOKEN_SHAPE_SOURCES, inlined above), plus a password assignment.
+const CREDENTIAL = new RegExp([...KB_TOKEN_SHAPE_SOURCES, "(?:password|passwd|contraseña)\\s*[:=]\\s*\\S+"].map((s) => `(?:${s})`).join("|"), "i");
+
+export interface SecurityReportLintInput {
+  /** The run directory's files by bare name (`report-data.json`, `summary.md`, `technical-*.md`), their committed text. */
+  files: ReadonlyMap<string, string>;
+  /** `report-data.json` as its first commit holds it; absent when this is that commit. */
+  firstData?: string | null;
+  /** The run directory's `<yyyy-mm-dd>` and `<reviewId>`, when its name is well formed (K1). */
+  day?: string | null;
+  reviewId?: string | null;
+}
+
+/** K19's frontmatter check of one report file: the parsed frontmatter, or null when it fails. */
+function reportFrontmatterOf(name: string, text: string, data: ReportData, dataSha: string, k19: (m: string) => void): Record<string, unknown> | null {
+  let failed = false;
+  const fail = (m: string): void => {
+    failed = true;
+    k19(m);
+  };
+  const split = splitFrontmatter(text);
+  if (!split.ok) {
+    fail(`the file ${split.error}`);
+    return null;
+  }
+  const parsed = parseFrontmatter(split.frontmatter);
+  if (!parsed.ok) {
+    fail(parsed.error);
+    return null;
+  }
+  const fm = parsed.value;
+  const validate = securityReportSchemas().file;
+  if (!validate(fm)) {
+    for (const m of reportSchemaErrors(validate.errors)) fail(`frontmatter ${m} (schema/security-report.v1.json)`);
+    return null;
+  }
+  const doc = fm as Record<string, unknown>;
+  const summary = name === SECURITY_REPORT_SUMMARY_FILE;
+  if (doc.kind !== (summary ? "summary" : "technical")) fail(`\`kind\` is \`${clean(doc.kind)}\`, must be \`${summary ? "summary" : "technical"}\` for \`${name}\``);
+  if (doc.review !== data.review.id) fail(`\`review\` is \`${clean(doc.review)}\`, must be the data file's \`${data.review.id}\``);
+  if (doc.lang !== data.review.lang) fail(`\`lang\` is \`${clean(doc.lang)}\`, must be the data file's \`${data.review.lang}\``);
+  if (doc.dataSha256 !== dataSha) fail(`\`dataSha256\` is not the sha256 of the committed report-data.json (${dataSha})`);
+  if (!summary) {
+    const repo = name === SECURITY_REPORT_CHAINS_FILE ? "chains" : data.repos.find((r) => technicalFileOf(r.repo) === name)?.repo;
+    if (repo === undefined) fail(`no reviewed repository's slug names \`${name}\``);
+    else if (doc.repo !== repo) fail(`\`repo\` is \`${clean(doc.repo)}\`, must be \`${repo}\``);
+    const covers = new Set((doc.covers as string[]).map(String));
+    ((doc.suggestedTasks ?? []) as Array<Record<string, unknown>>).forEach((s, i) => {
+      if (!refsNamedIn(`${String(s.title)} ${String(s.why)}`).some((r) => covers.has(r))) fail(`suggested task ${i + 1} names no ref this file covers`);
+    });
+  }
+  return failed ? null : doc;
+}
+
+/**
+ * K19–K23 over a run directory's files (§4.3). Files are checked in name order; a data file that is
+ * missing, not JSON or not well formed stops the lint at K19 (the other rules read it).
+ *
+ * K20's prose numerals are read in `summary.md` only, outside its tables and frontmatter: technical
+ * sections quote scenarios, where a numeral beside "high" is not a count claim.
+ */
+export function securityReportLint(input: SecurityReportLintInput): KbFailure[] {
+  const out: KbFailure[] = [];
+  const push = (rule: KRule, file: string, message: string): void => void out.push({ rule, file, message });
+  const raw = input.files.get(SECURITY_REPORT_DATA_FILE);
+  if (raw === undefined) {
+    push("K19", SECURITY_REPORT_DATA_FILE, `the run directory has no ${SECURITY_REPORT_DATA_FILE}`);
+    return out;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    push("K19", SECURITY_REPORT_DATA_FILE, `not JSON: ${clean((e as Error).message)}`);
+    return out;
+  }
+  const validate = securityReportSchemas().data;
+  const shape = validate(parsed) ? reportDataArithmetic(parsed as ReportData) : reportSchemaErrors(validate.errors).map((m) => `${m} (schema/security-report-data.v1.json)`);
+  for (const m of shape) push("K19", SECURITY_REPORT_DATA_FILE, m);
+  if (shape.length > 0) return out;
+  const data = parsed as ReportData;
+  if (securityReportDataJsonOf(data) !== raw) push("K19", SECURITY_REPORT_DATA_FILE, "not in canonical form (sorted keys, two-space indent, final newline) — Studio writes it, nobody edits it");
+  if (input.firstData != null && input.firstData !== raw) push("K19", SECURITY_REPORT_DATA_FILE, "changed after its first commit — the data file is Studio's, committed once");
+  if (input.day != null && input.reviewId != null && (input.day !== data.review.day || input.reviewId !== data.review.id)) {
+    push("K19", SECURITY_REPORT_DATA_FILE, `the run directory is \`${input.day}-${input.reviewId}\`, but the data file's review is \`${data.review.day}-${data.review.id}\` (§4.1)`);
+  }
+  const dataSha = createHash("sha256").update(raw, "utf8").digest("hex");
+
+  const known = new Set<string>([
+    ...data.findings.flatMap((f) => [f.ref, ...f.refs]),
+    ...data.refuted.flatMap((r) => [r.ref, r.finding]),
+    ...data.couldntVerify.map((c) => c.ref),
+    ...SECURITY_STATUSES.flatMap((st) => data.diff[st]),
+  ]);
+  const notReverified = new Set(data.findings.filter((f) => f.verification === "not_reverified").flatMap((f) => [f.ref, ...f.refs]));
+  const titlesByRef = new Map<string, string[]>();
+  for (const [refs, title] of [...data.findings.map((f): [string[], string] => [[f.ref, ...f.refs], f.title]), ...data.refuted.map((r): [string[], string] => [[r.ref, r.finding], r.title])]) {
+    for (const r of refs) titlesByRef.set(r, [...(titlesByRef.get(r) ?? []), title]);
+  }
+  const refutedRefs = new Set(data.refuted.flatMap((r) => [r.ref, r.finding]));
+  const technicalFiles = data.files.filter((f) => f !== SECURITY_REPORT_SUMMARY_FILE);
+  const counts = {
+    findings: data.counts.findings,
+    kept: data.counts.kept,
+    notReverified: data.counts.notReverified,
+    ...data.counts.bySeverity,
+    ...(Object.fromEntries(SECURITY_SEVERITIES.map((s) => [`open:${s}`, data.findings.filter((f) => f.severity === s).length])) as Record<`open:${SecuritySeverity}`, number>),
+    refuted: data.counts.refuted,
+    open: data.counts.byStatus.new + data.counts.byStatus.still_open + data.counts.byStatus.regressed,
+    openCriticalHigh: data.counts.openCriticalHigh,
+    repositories: data.repos.length,
+  } satisfies Record<CountKey, number>;
+
+  for (const name of [...input.files.keys()].sort()) {
+    if (name === SECURITY_REPORT_DATA_FILE) continue;
+    const text = input.files.get(name) as string;
+    const summary = name === SECURITY_REPORT_SUMMARY_FILE;
+    if (!(summary || SECURITY_REPORT_TECHNICAL_RE.test(name))) {
+      push("K19", name, "not a report file name (report-data.json, summary.md, technical-<repo-slug>.md, technical-chains.md)");
+      continue;
+    }
+    if (!data.files.includes(name)) {
+      push("K19", name, "not in the data file's `files`");
+      continue;
+    }
+    const fm = reportFrontmatterOf(name, text, data, dataSha, (m) => push("K19", name, m));
+    const split = splitFrontmatter(text);
+    const body = split.ok ? split.body : text;
+    const lines = body.split("\n");
+
+    // ── K23 exposure ──
+    for (const line of text.split("\n")) {
+      if (PUBLIC_ACK.test(line)) push("K23", name, "an `Alissa-Public-Ack` line");
+      if (CREDENTIAL.test(line)) push("K23", name, "a credential-shaped string (named, never quoted)");
+    }
+    if (summary) {
+      let fenced = false;
+      for (const line of lines) {
+        if (CODE_FENCE.test(line)) {
+          if (!fenced) push("K23", name, "a code fence in the summary");
+          fenced = true;
+        }
+        if (PATH_LINE_CITE.test(line)) push("K23", name, `a \`path:line\` cite in the summary: ${clean(line.trim())}`);
+        if (CODE_REPO_LINK.test(line)) push("K23", name, `a link to a code repository in the summary: ${clean(line.trim())}`);
+        if (EXPOSURE_HEADING.test(line)) push("K23", name, `the heading "${clean(line.trim())}" in the summary`);
+        if (SECURITY_BLOCK.test(line)) push("K23", name, "a `security:` block in the summary");
+      }
+    }
+
+    // ── K21 refs ──
+    for (const r of refsNamedIn(text)) if (!known.has(r)) push("K21", name, `${clean(r)} is not in the data file`);
+    if (fm && !summary) {
+      const want = [...data.findings.filter((f) => f.file === name).map((f) => f.ref), ...data.refuted.filter((r) => r.file === name).map((r) => r.finding)];
+      const got = (fm.covers as string[]).map(String);
+      if (got.join("\n") !== want.join("\n")) push("K21", name, `\`covers\` is [${clean(got.join(", "))}], the data file assigns [${want.join(", ")}] in this order`);
+    }
+    if (fm && summary) {
+      const links = (fm.links as string[]).map(String);
+      if ([...links].sort().join("\n") !== [...technicalFiles].sort().join("\n")) push("K21", name, `\`links\` is [${clean(links.join(", "))}], must be every technical file [${technicalFiles.join(", ")}]`);
+      for (const m of body.matchAll(/\]\(\s*<?([^)\s#>]+)/g)) {
+        const target = m[1] as string;
+        if (/^[a-z][a-z0-9+.-]*:/i.test(target)) continue;
+        if (!links.includes(target)) push("K21", name, `links \`${clean(target)}\`, which is not in \`links\``);
+      }
+      // The notes are read in the Repository notes section only (§2.1 item 6).
+      const head = lines.findIndex((l) => NOTES_HEADING.test(l));
+      const end = head < 0 ? -1 : lines.findIndex((l, i) => i > head && /^#{1,6}\s/.test(l));
+      const notesLines = head < 0 ? [] : lines.slice(head + 1, end < 0 ? lines.length : end);
+      for (const r of data.repos) {
+        for (const n of r.notes) {
+          const ok = notesLines.some((l) => l.includes(r.repo) && (n.kind === "public" || l.includes(n.parent)));
+          if (!ok) push("K21", name, `the ${n.kind} note of ${r.repo} is missing`);
+        }
+      }
+    }
+
+    // ── K20 numbers (summary) ──
+    if (summary) {
+      if (!body.includes(securityReportCountsTableOf(data))) push("K20", name, "the At a glance table is not the data file's rendering, byte for byte");
+      for (const line of lines) {
+        if (line.trimStart().startsWith("|")) continue;
+        const why = k20Line(line, counts);
+        if (why) push("K20", name, why);
+      }
+    }
+
+    // ── K22 status ──
+    for (const line of lines) {
+      const named = refsNamedIn(line);
+      if (named.some((r) => notReverified.has(r))) {
+        const stripped = line.replace(NOT_REVERIFIED_WORDS, "");
+        if (summary && stripped === line) push("K22", name, `a Not re-verified ref without the Not re-verified words: ${clean(line.trim())}`);
+        // The titles of the rows the line names are Studio's (§2.2 headings carry them): a title's own words upgrade nothing.
+        const titles = [...new Set(named.flatMap((r) => titlesByRef.get(r) ?? []))].sort((x, y) => y.length - x.length);
+        const untitled = titles.reduce((l, t) => l.split(t).join(" "), stripped);
+        if (UPGRADE_WORDS.test(untitled)) push("K22", name, `a Not re-verified ref called kept or verified: ${clean(line.trim())}`);
+      }
+      if (named.some((r) => refutedRefs.has(r)) && !named.some((r) => notReverified.has(r) || data.findings.some((f) => f.ref === r)) && OPEN_WORDS.test(line)) {
+        push("K22", name, `a refuted ref listed as open: ${clean(line.trim())}`);
+      }
+    }
+    if (!summary) {
+      for (const f of data.findings.filter((x) => x.file === name)) {
+        const at = lines.findIndex((l) => /^#{1,6}\s/.test(l) && refsNamedIn(l).includes(f.ref));
+        if (at < 0) {
+          push("K22", name, `no section heading names ${f.ref}`);
+          continue;
+        }
+        const badge = lines.slice(at + 1).find((l) => l.trim() !== "")?.trim();
+        const want = securityReportBadgeOf(f, data.review.lang);
+        if (badge !== want) push("K22", name, `${f.ref}'s badge line is "${clean(badge ?? "")}", the data file says "${want}"`);
+      }
+    }
+  }
+  return out;
 }
 
 // ── The integration-check mode: I1–I9 (design alissa-build-integration-check §3.5) ───────────────

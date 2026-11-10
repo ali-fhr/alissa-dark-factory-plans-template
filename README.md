@@ -34,8 +34,13 @@ nothing in this repository names it.
 ├── knowledge-base/                        ← discovery findings, append-only (see "The knowledge base" below)
 │   ├── <YYYY>/<MM>/<DD>/TASK-<n>/         ← one discovery task: its creation day (UTC) and number
 │   │   └── findings.md                    ← schema/findings.v1.json frontmatter + prose; nothing else
-│   └── assessments/
-│       └── <project-slug>-<yyyy-mm-dd>.md ← milestone 0's assessment, from its one design task
+│   ├── assessments/
+│   │   └── <project-slug>-<yyyy-mm-dd>.md ← milestone 0's assessment, from its one design task
+│   └── security-reports/
+│       └── <yyyy-mm-dd>-<reviewId>/       ← one Code Security review's written report (K19–K23 below)
+│           ├── report-data.json           ← Studio's numbers: schema/security-report-data.v1.json
+│           ├── summary.md                 ← the executive summary: schema/security-report.v1.json frontmatter
+│           └── technical-<repo-slug>.md   ← one per repository (technical-chains.md for the chains)
 └── integration-check/                     ← integration-check reports, append-only (see "The integration check" below)
     └── <YYYY>/<MM>/<DD>/<milestone>/      ← one run: its start day (UTC); <milestone> = <project-slug>-m<n>[-r<k>]
         ├── report.md                      ← schema/integration-check.v1.json frontmatter + prose
@@ -481,7 +486,7 @@ never *nothing to lint* — under the K rules, numbered apart from §5.5's:
 
 | Rule | Name | Refuses | Reads |
 |---|---|---|---|
-| K1 | layout and immutability | a diff outside **one** new `knowledge-base/<YYYY>/<MM>/<DD>/TASK-<n>/` directory (a mix with `plans/**` included); a directory already on the base branch; anything in it but `findings.md` and a flat `evidence/` folder; a nested `evidence/` path, a symlink, an evidence file misnamed, of a type not admitted, an image whose bytes are not its type, text evidence that is not UTF-8, or an svg that is not inert; a date that is not a real calendar day; a change that is not an add. **The one exception:** exactly one new `knowledge-base/assessments/<project-slug>-<yyyy-mm-dd>.md` file and nothing else, from a `kind: design` task (milestone 0's assessment, §7.1) — the pull request's task is its `TASK-<n>-…` branch (`GITHUB_HEAD_REF`) or `--task` | git; Alissa for the assessment's task |
+| K1 | layout and immutability | a diff outside **one** new `knowledge-base/<YYYY>/<MM>/<DD>/TASK-<n>/` directory (a mix with `plans/**` included); a directory already on the base branch; anything in it but `findings.md` and a flat `evidence/` folder; a nested `evidence/` path, a symlink, an evidence file misnamed, of a type not admitted, an image whose bytes are not its type, text evidence that is not UTF-8, or an svg that is not inert; a date that is not a real calendar day; a change that is not an add. **The one exception:** exactly one new `knowledge-base/assessments/<project-slug>-<yyyy-mm-dd>.md` file and nothing else, from a `kind: design` task (milestone 0's assessment, §7.1) — the pull request's task is its `TASK-<n>-…` branch (`GITHUB_HEAD_REF`) or `--task`. **The second:** files added to one `knowledge-base/security-reports/<yyyy-mm-dd>-<reviewId>/` run directory, flat and regular, from a `kind: design` task the same way; a file already on the base branch is never edited (below) | git; Alissa for the assessment's or the report's task |
 | K2 | frontmatter | frontmatter that does not split, parse or validate against `schema/findings.v1.json`; a `task` that is not the directory's; a repeated question id or `reads` repository; a cite of a repository not in `reads` | — |
 | K3 | completeness | an `answered` or `partial` question with no `answer`; an `unanswerable` one with no `reason`; an `answered` one with no cite; a body with no `## Summary` | — |
 | K4 | size | `findings.md` over 32 KB; more than 12 questions, 12 risks, 8 suggested tasks or 24 cites per entry; a cite spanning more than 400 lines; a `## Summary` over 1,200 characters or a question's section over 6,000; an evidence file over 2 MB, a folder over 10 MB or 20 files | — |
@@ -499,12 +504,53 @@ never *nothing to lint* — under the K rules, numbered apart from §5.5's:
 | K16 | doc key | two questions in one file sharing a `doc.key`; a key that is not `[a-z0-9.-]{1,80}` | — |
 | K17 | verbatim passage | a `passage` that is not a substring of `docPath` at the SHA `reads` pins for `docRepo` (the task's `Alissa-Reads`), whitespace-normalized; a `docRepo` not in `reads` — asked of Studio through K7's verify route, never of GitHub | Studio |
 | K18 | doc file | a `findings.md` with any `doc` block whose frontmatter lacks `kind: doc_check` | — |
+| K19 | report shape | in a security report's run directory: a report file whose frontmatter fails `schema/security-report.v1.json`, names another review or language than the data file, or whose `repo` is not its file name's; a file name outside `report-data.json`, `summary.md`, `technical-<repo-slug>.md`, or not in the data file's `files`; a `dataSha256` that is not the sha256 of the committed `report-data.json`; a data file that fails `schema/security-report-data.v1.json` or its own arithmetic, is not in canonical form, does not match the run directory's name, or changed after its first commit; a suggested task naming no ref its file covers | — |
+| K20 | report numbers | a summary without the At a glance table byte-equal to the data file's rendering; a numeral in the summary's prose within four words of a count noun (en and es: findings, critical, high, medium, low, refuted, open, repositories) that is not the data file's count for that noun | — |
+| K21 | report refs | a `TASK-<n>#<id>` in any report file that is not in the data file; a technical file whose `covers` is not exactly the data file's findings and refuted rows assigned to it, in data order; a summary that links a file not in `links`, a `links` that is not every technical file, or a summary missing one of the data file's repository notes | — |
+| K22 | report status | a finding section whose badge line is not `Status: <status> · <kept / Not re-verified>` as the data file says; a Not re-verified ref on a summary line without the Not re-verified words; kept, confirmed, verified (or confirmado, verificado, mantenido) on a line that names a Not re-verified ref, the row's own title aside; a refuted ref listed as open | — |
+| K23 | report exposure | in `summary.md`: a code fence, a `path:line` cite, a link to a code repository, a Scenario or Fix heading (en or es), a `security:` block; in any report file: an `Alissa-Public-Ack` line or a credential-shaped string (K5's token shapes, or a password assignment) | — |
 
 ```sh
 npm run plan-lint -- --kb knowledge-base/2026/10/14/TASK-1234             # K1–K18 (K6–K8 and K17 need ALISSA_API_TOKEN)
 npm run plan-lint -- --kb knowledge-base/2026/10/14/TASK-1234 --offline   # K1–K5, K9–K16 and K18 only, no network
 npm run plan-lint -- --kb knowledge-base/assessments/shop-2026-10-14.md --task TASK-2000
+npm run plan-lint -- --kb knowledge-base/security-reports/2026-11-09-k17acmereview0001 --task TASK-2000   # K1, K19–K23
 ```
+
+**Code Security reports — K19–K23** (design `alissa-code-security-reports.md` §4.1–§4.4 in
+`ali-fhr/studio.alissa.app`, lane CSR-2). A security review's Report milestone writes its record into
+one run directory, `knowledge-base/security-reports/<yyyy-mm-dd>-<reviewId>/`, the day being the
+review's creation day (UTC):
+
+- **`report-data.json` is Studio's**, written by `securityReportDataOf` and committed once, before the
+  run directory's report files: sorted keys, two-space indent, a final newline, no exploit scenario, fix
+  or cite line range. Today the lint admits it only through a `kind: design` task's pull request (K1).
+  A plan PR still never touches `knowledge-base/` (§5.5 rule 1), so design §4.1's "committed by the
+  Report plan's PLAN- PR" is refused here. Which side moves is open under TASK-883979134. It is the only source of numbers and refs, and it decides which technical file covers
+  each finding (`file`). Its schema is `schema/security-report-data.v1.json`
+  (`alissa-security-report-data/v1`); K19 also checks its arithmetic, its bytes and that it never
+  changes.
+- **`summary.md` and `technical-<repo-slug>.md`** (`technical-chains.md` for the cross-repo chains)
+  are the Report tasks' prose, each with the frontmatter of `schema/security-report.v1.json`
+  (`alissa-security-report/v1`): `kind`, `review`, `lang`, `data: report-data.json` and `dataSha256`,
+  then `links` on the summary, or `repo`, `covers` and an optional `suggestedTasks` (the findings
+  schema's shape) on a technical file.
+- **Prose may say less than the data file, never more and never something else.** "Two critical
+  findings" with one critical in the data file fails K20, and calling a Not re-verified finding
+  confirmed fails K22. The summary is the shareable document, so it never carries a code fence, a
+  cite or a scenario (K23).
+- **K1** admits the run directory's files from a `kind: design` task only, read online as for an
+  assessment. A pull request adds files to the one run directory and nothing else, and a file already
+  merged is never edited, since the record is immutable. An edited `report-data.json` is K19's
+  finding. The rules judge the run directory as it will stand, so a technical task's PR is linted with
+  the data file and the technical files already merged. The summary task's PR, which comes last, is
+  where `links` and every repository note must be complete.
+- **Offline, every one.** K19–K23 read no network, and only K1's design-task check needs the token.
+  They are the port of Studio's `securityReportLintOf` (`convex/core/securityReportData.ts`, lane
+  CSR-1). Studio re-runs the same rules before it imports a report into Docs, so a fleet on an older
+  template cannot import a drifted report either. `fixtures/security-report/` is CSR-1's
+  `tests/fixtures/security-report/`, copied byte for byte. `lint/test/security-report.test.ts` pins
+  its git tree id, and a change to the fixtures is made in Studio first.
 
 - **K7 goes through Studio's verify route**, so no GitHub credential ever enters this repository.
   The linter posts every distinct cite once, `POST /v1/factory/repo-files/verify` with the lint
@@ -560,7 +606,9 @@ npm run plan-lint -- --kb knowledge-base/assessments/shop-2026-10-14.md --task T
   `findings-schema: alissa-findings/v1.1` and `K8` in `kb-rules` gets no URL cites (lane DS-11); one
   whose stamp lacks `alissa-findings/v1.2` and `K9` lints no `evidence/` folder; one whose stamp
   lacks `alissa-findings/v1.3` and `K10`–`K14` lints no `security` block; one whose stamp lacks
-  `alissa-findings/v1.4` and `K15`–`K18` lints no `doc` block.
+  `alissa-findings/v1.4` and `K15`–`K18` lints no `doc` block; one whose stamp lacks
+  `security-report-schemas: alissa-security-report-data/v1 alissa-security-report/v1` and `K19`–`K23`
+  lints no security report.
   `lint/test/kb.test.ts` keeps the stamp in step with the schemas and the rules.
 - **Rollout.** The template changes new plans repositories only; the provisioner never overwrites
   an adopted one. Until an existing repository is upgraded — by an ordinary `TASK-` lane in that

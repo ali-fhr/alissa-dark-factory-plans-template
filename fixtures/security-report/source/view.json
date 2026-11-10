@@ -1,0 +1,253 @@
+{
+  "state": "ready",
+  "report": {
+    "task": "TASK-1041",
+    "path": "knowledge-base/2026/11/09/TASK-1041/findings.md",
+    "milestone": "ms-verify",
+    "files": [
+      {
+        "task": "TASK-1040",
+        "path": "knowledge-base/2026/11/09/TASK-1040/findings.md"
+      },
+      {
+        "task": "TASK-1041",
+        "path": "knowledge-base/2026/11/09/TASK-1041/findings.md"
+      }
+    ]
+  },
+  "couldntVerify": [
+    {
+      "ref": "TASK-1040#owner-1",
+      "kind": "provider_keys",
+      "what": "Webhook signing key rotation",
+      "why": "Only the owner can see the provider's dashboard."
+    },
+    {
+      "ref": "TASK-1041#q6",
+      "kind": "payments",
+      "what": "Refund limits configured at the payment provider",
+      "why": "The limits live in the provider's settings, not in the code."
+    }
+  ],
+  "severity": [
+    {
+      "severity": "critical",
+      "total": 1,
+      "new": 1,
+      "still_open": 0,
+      "fixed": 0,
+      "regressed": 0
+    },
+    {
+      "severity": "high",
+      "total": 2,
+      "new": 2,
+      "still_open": 0,
+      "fixed": 0,
+      "regressed": 0
+    },
+    {
+      "severity": "medium",
+      "total": 1,
+      "new": 1,
+      "still_open": 0,
+      "fixed": 0,
+      "regressed": 0
+    },
+    {
+      "severity": "low",
+      "total": 1,
+      "new": 1,
+      "still_open": 0,
+      "fixed": 0,
+      "regressed": 0
+    }
+  ],
+  "findings": [
+    {
+      "ref": "TASK-1040#q2",
+      "key": "payments-api.money.refundhandler",
+      "title": "Refunds accept an amount the order never had",
+      "severity": "critical",
+      "calibration": null,
+      "repos": [
+        "acme-shop/payments-api"
+      ],
+      "category": "money",
+      "consequence": "money",
+      "reachable": "yes",
+      "cwe": "CWE-840",
+      "status": "new",
+      "declared": "new",
+      "codeRemoved": false,
+      "refs": [
+        "TASK-1040#q2",
+        "TASK-1020#q5"
+      ],
+      "refutedIn": []
+    },
+    {
+      "ref": "TASK-1040#q3",
+      "key": "storefront.authz.sessionrelay",
+      "title": "The storefront forwards the session to the payments service without checking its scope",
+      "severity": "high",
+      "calibration": null,
+      "repos": [
+        "acme-shop/storefront",
+        "acme-shop/payments-api"
+      ],
+      "category": "authz",
+      "consequence": "data",
+      "reachable": "yes",
+      "cwe": null,
+      "status": "new",
+      "declared": "new",
+      "codeRemoved": false,
+      "refs": [
+        "TASK-1040#q3"
+      ],
+      "refutedIn": []
+    },
+    {
+      "ref": "TASK-1012#q5",
+      "key": "storefront.storage.uploads",
+      "title": "Uploaded receipts are served from a bucket anyone can list",
+      "severity": "high",
+      "calibration": null,
+      "repos": [
+        "acme-shop/storefront"
+      ],
+      "category": "storage",
+      "consequence": "data",
+      "reachable": "yes",
+      "cwe": null,
+      "status": "new",
+      "declared": "new",
+      "codeRemoved": false,
+      "refs": [
+        "TASK-1012#q5"
+      ],
+      "refutedIn": [],
+      "notReverified": true
+    },
+    {
+      "ref": "TASK-1040#q4",
+      "key": "payments-api.secrets.logging",
+      "title": "Webhook payloads are logged with the customer's email",
+      "severity": "medium",
+      "calibration": "Only operators read the logs.",
+      "repos": [
+        "acme-shop/payments-api"
+      ],
+      "category": "secrets",
+      "consequence": "leak",
+      "reachable": "yes",
+      "cwe": null,
+      "status": "new",
+      "declared": "new",
+      "codeRemoved": false,
+      "refs": [
+        "TASK-1040#q4"
+      ],
+      "refutedIn": []
+    },
+    {
+      "ref": "TASK-1014#q1",
+      "key": "storefront.supply-chain.lockfile",
+      "title": "The lockfile pins a template library two majors behind",
+      "severity": "low",
+      "calibration": null,
+      "repos": [
+        "acme-shop/storefront"
+      ],
+      "category": "supply_chain",
+      "consequence": "security",
+      "reachable": "unknown",
+      "cwe": null,
+      "status": "new",
+      "declared": "new",
+      "codeRemoved": false,
+      "refs": [
+        "TASK-1014#q1"
+      ],
+      "refutedIn": [],
+      "notReverified": true
+    }
+  ],
+  "diff": {
+    "basis": "declared",
+    "new": [
+      {
+        "ref": "TASK-1040#q2",
+        "key": "payments-api.money.refundhandler",
+        "title": "Refunds accept an amount the order never had",
+        "severity": "critical",
+        "status": "new",
+        "absent": false,
+        "codeRemoved": false
+      },
+      {
+        "ref": "TASK-1040#q3",
+        "key": "storefront.authz.sessionrelay",
+        "title": "The storefront forwards the session to the payments service without checking its scope",
+        "severity": "high",
+        "status": "new",
+        "absent": false,
+        "codeRemoved": false
+      },
+      {
+        "ref": "TASK-1012#q5",
+        "key": "storefront.storage.uploads",
+        "title": "Uploaded receipts are served from a bucket anyone can list",
+        "severity": "high",
+        "status": "new",
+        "absent": false,
+        "codeRemoved": false
+      },
+      {
+        "ref": "TASK-1040#q4",
+        "key": "payments-api.secrets.logging",
+        "title": "Webhook payloads are logged with the customer's email",
+        "severity": "medium",
+        "status": "new",
+        "absent": false,
+        "codeRemoved": false
+      },
+      {
+        "ref": "TASK-1014#q1",
+        "key": "storefront.supply-chain.lockfile",
+        "title": "The lockfile pins a template library two majors behind",
+        "severity": "low",
+        "status": "new",
+        "absent": false,
+        "codeRemoved": false
+      }
+    ],
+    "still_open": [],
+    "fixed": [],
+    "regressed": []
+  },
+  "notTraced": [
+    {
+      "repo": "acme-shop/admin",
+      "reason": "repos_cap"
+    }
+  ],
+  "refuted": [
+    {
+      "ref": "TASK-1041#q1",
+      "finding": "TASK-1013#q4",
+      "key": "storefront.injection.search",
+      "title": "Search builds a query from the raw term",
+      "severity": "high",
+      "reason": "The term is bound as a parameter."
+    }
+  ],
+  "openCriticalHigh": 3,
+  "repoNotes": [
+    {
+      "repo": "acme-shop/storefront",
+      "kind": "public"
+    }
+  ]
+}

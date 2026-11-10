@@ -1,0 +1,215 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/ali-fhr/alissa-plans/schema/security-report.v1.json",
+  "title": "alissa-plans security report file frontmatter, version 1 (knowledge-base/security-reports/<yyyy-mm-dd>-<reviewId>/summary.md | technical-<repo-slug>.md)",
+  "description": "The frontmatter of a Code Security report file (design alissa-code-security-reports §4.2, lane CSR-2). A summary carries links; a technical file carries repo and covers, and optionally suggestedTasks in the findings schema's suggestedTasks shape, each naming a ref it covers. K19 also holds review, lang and dataSha256 to the run directory's report-data.json, and repo to the file's name.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "kind",
+    "review",
+    "lang",
+    "data",
+    "dataSha256"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "alissa-security-report/v1"
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "summary",
+        "technical"
+      ]
+    },
+    "review": {
+      "type": "string",
+      "pattern": "^[a-z0-9]{1,64}$",
+      "description": "The data file's review.id."
+    },
+    "lang": {
+      "type": "string",
+      "enum": [
+        "en",
+        "es-MX"
+      ],
+      "description": "The data file's review.lang."
+    },
+    "data": {
+      "type": "string",
+      "const": "report-data.json"
+    },
+    "dataSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "The sha256 of report-data.json's bytes at its commit."
+    },
+    "repo": {
+      "type": "string",
+      "anyOf": [
+        {
+          "const": "chains"
+        },
+        {
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        }
+      ],
+      "description": "Technical only: the repository the file covers, or chains for technical-chains.md."
+    },
+    "covers": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^TASK-[0-9]+#[A-Za-z0-9][A-Za-z0-9._-]*$"
+      },
+      "description": "Technical only: the findings' ref and the refuted rows' finding the data file assigns to this file, in data order (K21)."
+    },
+    "links": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^technical-[a-z0-9]+(?:-[a-z0-9]+)*\\.md$"
+      },
+      "description": "Summary only: every technical file (K21)."
+    },
+    "suggestedTasks": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "title",
+          "repo",
+          "commitClass",
+          "scope",
+          "why"
+        ],
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 200
+          },
+          "repo": {
+            "$ref": "#/definitions/repo"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "code",
+              "design"
+            ]
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "top"
+            ]
+          },
+          "commitClass": {
+            "type": "string",
+            "enum": [
+              "schema-migration",
+              "auth-secrets",
+              "pricing-billing",
+              "customer-promise",
+              "product-surface",
+              "gate-verification",
+              "drift-fix",
+              "flaky-test",
+              "exhaust-followup",
+              "doc-correction"
+            ]
+          },
+          "scope": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 12,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[^\\s,]+$"
+            }
+          },
+          "new": {
+            "type": "array",
+            "maxItems": 12,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[^\\s,*]+$"
+            }
+          },
+          "why": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "description": "Technical only, optional: the findings schema's suggestedTasks shape (findings.v1.json), each naming a ref this file covers in its title or why (K19)."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "summary"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "required": [
+          "links"
+        ],
+        "properties": {
+          "links": true,
+          "repo": false,
+          "covers": false,
+          "suggestedTasks": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "technical"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "required": [
+          "repo",
+          "covers"
+        ],
+        "properties": {
+          "repo": true,
+          "covers": true,
+          "links": false
+        }
+      }
+    }
+  ],
+  "definitions": {
+    "repo": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    }
+  }
+}

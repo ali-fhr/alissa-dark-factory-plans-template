@@ -1,0 +1,10 @@
+{
+  "id": "k17acmereview0001",
+  "projectId": "m23acmeproject001",
+  "createdAt": 1794236400000,
+  "lang": "en",
+  "templateVersion": 1,
+  "previousReviewId": null,
+  "repos": [{ "repo": "acme-shop/storefront" }, { "repo": "acme-shop/payments-api" }],
+  "chains": { "storefront.authz.sessionrelay": "chain-1" }
+}
