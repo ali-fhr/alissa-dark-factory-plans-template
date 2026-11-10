@@ -57,6 +57,16 @@ function gitOk(repo: string, args: string[]): boolean {
   }
 }
 
+/** Whether anything (a file, a directory, a dangling symbolic link) sits at `abs`. */
+function pathPresent(abs: string): boolean {
+  try {
+    lstatSync(abs);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** A revision argument must never be mistaken for an option. */
 export function assertRev(rev: string, name: string): void {
   if (!/^[A-Za-z0-9_][A-Za-z0-9_./^~@{}-]*$/.test(rev)) {
@@ -395,10 +405,18 @@ function readSecurityReportDir(abs: string, label: string, repoPath: string): Kb
 
 /**
  * The directory mode's immutability for a run directory: a file the base branch holds must be
- * byte-equal here (a report file merged by an earlier task's PR); `report-data.json`'s base text is
- * kept for K19.
+ * present and byte-equal here (a report file merged by an earlier task's PR); `report-data.json`'s
+ * base text is kept for K19. `where` is the run directory itself.
  */
 function checkSecurityReportBase(where: string, ref: string, repoPath: string, src: KbSource): void {
+  if (gitOk(where, ["cat-file", "-e", `${ref}:${repoPath}`])) {
+    const merged = git(where, ["ls-tree", "--full-tree", "--name-only", "-z", `${ref}:${repoPath}`]).toString("utf8").split("\0").filter((n) => n !== "");
+    for (const name of merged.sort()) {
+      if (!src.sizes.has(name) && !pathPresent(join(where, name))) {
+        src.layout.push(`\`${repoPath}/${name}\` exists on the base branch (${ref}) but not here — a merged report file is never deleted (alissa-code-security-reports §4.4)`);
+      }
+    }
+  }
   for (const [name, text] of src.files) {
     const spec = `${ref}:${repoPath}/${name}`;
     if (!gitOk(where, ["cat-file", "-e", spec])) continue;

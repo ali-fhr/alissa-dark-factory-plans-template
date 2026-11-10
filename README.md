@@ -522,9 +522,11 @@ npm run plan-lint -- --kb knowledge-base/security-reports/2026-11-09-k17acmerevi
 one run directory, `knowledge-base/security-reports/<yyyy-mm-dd>-<reviewId>/`, the day being the
 review's creation day (UTC):
 
-- **`report-data.json` is Studio's**, written by `securityReportDataOf` and committed once before any
-  Report task starts: sorted keys, two-space indent, a final newline, no exploit scenario, fix or cite
-  line range. It is the only source of numbers and refs, and it decides which technical file covers
+- **`report-data.json` is Studio's**, written by `securityReportDataOf` and committed once, before the
+  run directory's report files: sorted keys, two-space indent, a final newline, no exploit scenario, fix
+  or cite line range. Today the lint admits it only through a `kind: design` task's pull request (K1).
+  A plan PR still never touches `knowledge-base/` (§5.5 rule 1), so design §4.1's "committed by the
+  Report plan's PLAN- PR" is refused here. Which side moves is open under TASK-883979134. It is the only source of numbers and refs, and it decides which technical file covers
   each finding (`file`). Its schema is `schema/security-report-data.v1.json`
   (`alissa-security-report-data/v1`); K19 also checks its arithmetic, its bytes and that it never
   changes.

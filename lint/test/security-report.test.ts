@@ -6,7 +6,7 @@
 // (a design task only), the pull-request mode (adds only, the data file never edited) and the schemas.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { cpSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import {
@@ -264,6 +264,17 @@ describe("--pr on a security report's run directory", () => {
     const data = await runCli(prArgs(b.repo, b.base, commitAll(b.repo, "edit data")), env());
     assert.equal(data.status, 1);
     assert.match(data.stdout, /K19 \(report shape\) — report-data\.json: changed after its first commit/);
+  });
+
+  it("--kb --base refuses a merged report file deleted from the working copy (K1), and passes it present", async () => {
+    const a = reportRepo(["technical-chains.md", "technical-acme-shop-storefront.md"]);
+    const kept = await runCli(["--kb", a.dir, "--offline", "--base", a.base]);
+    assert.doesNotMatch(kept.stdout, /never deleted/, kept.stdout + kept.stderr);
+    rmSync(join(a.dir, "technical-chains.md"));
+    const run = await runCli(["--kb", a.dir, "--offline", "--base", a.base]);
+    assert.equal(run.status, 1, run.stdout + run.stderr);
+    assert.match(run.stdout, /FAIL K1 \(layout and immutability\): `knowledge-base\/security-reports\/2026-11-09-k17acmereview0001\/technical-chains\.md` exists on the base branch \([0-9a-f]+\) but not here — a merged report file is never deleted/);
+    assert.doesNotMatch(run.stdout, /technical-acme-shop-storefront\.md` exists on the base branch/);
   });
 
   it("refuses a PR that mixes the run directory with a finding or a plan", async () => {
