@@ -1,0 +1,531 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/ali-fhr/alissa-plans/schema/security-report-data.v1.json",
+  "title": "alissa-plans security report data file, version 1 (knowledge-base/security-reports/<yyyy-mm-dd>-<reviewId>/report-data.json)",
+  "description": "Studio's numbers for one Code Security review run (design alissa-code-security-reports §4.1, lane CSR-2): written by Studio (securityReportDataOf), committed once, never edited. It carries no exploit scenario, fix, cite line range or answer prose except a refutation's reason. Every object's key set is exact. K19 holds a data file to this schema and, beyond it, to its own arithmetic (counts against the lists), its canonical bytes (sorted keys, two-space indent, final newline) and its first commit.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "review",
+    "repos",
+    "verifyFiles",
+    "counts",
+    "findings",
+    "refuted",
+    "couldntVerify",
+    "notTraced",
+    "diff",
+    "files"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "alissa-security-report-data/v1"
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "projectId",
+        "day",
+        "lang",
+        "templateVersion",
+        "previousReviewId"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]{1,64}$",
+          "description": "The review's id; the run directory's name ends in it."
+        },
+        "projectId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "day": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+          "description": "The review's createdAt day (UTC); the run directory's name starts with it."
+        },
+        "lang": {
+          "type": "string",
+          "enum": [
+            "en",
+            "es-MX"
+          ]
+        },
+        "templateVersion": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "previousReviewId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        }
+      }
+    },
+    "repos": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "repo",
+          "slug",
+          "notes"
+        ],
+        "properties": {
+          "repo": {
+            "$ref": "#/definitions/repo"
+          },
+          "slug": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+            "description": "owner-name, lowercase, every run of [^a-z0-9] one '-' (K19 checks it is the repo's)."
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/note"
+            }
+          }
+        }
+      }
+    },
+    "verifyFiles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "task",
+          "path"
+        ],
+        "properties": {
+          "task": {
+            "type": "string",
+            "pattern": "^TASK-[0-9]+$"
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "findings",
+        "kept",
+        "notReverified",
+        "refuted",
+        "couldntVerify",
+        "notTraced",
+        "openCriticalHigh",
+        "bySeverity",
+        "byStatus"
+      ],
+      "properties": {
+        "findings": {
+          "$ref": "#/definitions/count"
+        },
+        "kept": {
+          "$ref": "#/definitions/count"
+        },
+        "notReverified": {
+          "$ref": "#/definitions/count"
+        },
+        "refuted": {
+          "$ref": "#/definitions/count"
+        },
+        "couldntVerify": {
+          "$ref": "#/definitions/count"
+        },
+        "notTraced": {
+          "$ref": "#/definitions/count"
+        },
+        "openCriticalHigh": {
+          "$ref": "#/definitions/count"
+        },
+        "bySeverity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "critical",
+            "high",
+            "medium",
+            "low"
+          ],
+          "properties": {
+            "critical": {
+              "$ref": "#/definitions/count"
+            },
+            "high": {
+              "$ref": "#/definitions/count"
+            },
+            "medium": {
+              "$ref": "#/definitions/count"
+            },
+            "low": {
+              "$ref": "#/definitions/count"
+            }
+          }
+        },
+        "byStatus": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "new",
+            "still_open",
+            "fixed",
+            "regressed"
+          ],
+          "properties": {
+            "new": {
+              "$ref": "#/definitions/count"
+            },
+            "still_open": {
+              "$ref": "#/definitions/count"
+            },
+            "fixed": {
+              "$ref": "#/definitions/count"
+            },
+            "regressed": {
+              "$ref": "#/definitions/count"
+            }
+          }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ref",
+          "refs",
+          "key",
+          "title",
+          "severity",
+          "category",
+          "repos",
+          "chain",
+          "consequence",
+          "reachable",
+          "status",
+          "verification",
+          "codeRemoved",
+          "file"
+        ],
+        "properties": {
+          "ref": {
+            "$ref": "#/definitions/ref"
+          },
+          "refs": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/definitions/ref"
+            },
+            "description": "Starts with ref (K19)."
+          },
+          "key": {
+            "type": "string",
+            "minLength": 1
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "severity": {
+            "$ref": "#/definitions/severity"
+          },
+          "category": {
+            "type": "string",
+            "minLength": 1
+          },
+          "repos": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/repo"
+            },
+            "description": "Each a reviewed repository (K19)."
+          },
+          "chain": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1
+          },
+          "consequence": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reachable": {
+            "type": "string",
+            "enum": [
+              "yes",
+              "no",
+              "unknown"
+            ]
+          },
+          "status": {
+            "$ref": "#/definitions/status"
+          },
+          "verification": {
+            "type": "string",
+            "enum": [
+              "kept",
+              "not_reverified"
+            ]
+          },
+          "codeRemoved": {
+            "type": "boolean"
+          },
+          "file": {
+            "$ref": "#/definitions/technicalFile",
+            "description": "The technical file that must cover the finding (§2.2), decided by Studio."
+          }
+        }
+      }
+    },
+    "refuted": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ref",
+          "finding",
+          "key",
+          "title",
+          "severity",
+          "reason",
+          "file"
+        ],
+        "properties": {
+          "ref": {
+            "$ref": "#/definitions/ref"
+          },
+          "finding": {
+            "$ref": "#/definitions/ref"
+          },
+          "key": {
+            "type": "string",
+            "minLength": 1
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "severity": {
+            "$ref": "#/definitions/severity"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "file": {
+            "$ref": "#/definitions/technicalFile"
+          }
+        }
+      }
+    },
+    "couldntVerify": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ref",
+          "kind",
+          "what"
+        ],
+        "properties": {
+          "ref": {
+            "$ref": "#/definitions/ref"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "provider_keys",
+              "payments",
+              "production_data",
+              "devices",
+              "inboxes",
+              "app_start",
+              "time",
+              "other"
+            ]
+          },
+          "what": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "notTraced": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "repo",
+          "reason"
+        ],
+        "properties": {
+          "repo": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "diff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "basis",
+        "new",
+        "still_open",
+        "fixed",
+        "regressed"
+      ],
+      "properties": {
+        "basis": {
+          "type": "string",
+          "enum": [
+            "computed",
+            "declared"
+          ]
+        },
+        "new": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ref"
+          }
+        },
+        "still_open": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ref"
+          }
+        },
+        "fixed": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ref"
+          }
+        },
+        "regressed": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ref"
+          }
+        }
+      }
+    },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "contains": {
+        "const": "summary.md"
+      },
+      "items": {
+        "type": "string",
+        "anyOf": [
+          {
+            "const": "summary.md"
+          },
+          {
+            "pattern": "^technical-[a-z0-9]+(?:-[a-z0-9]+)*\\.md$"
+          }
+        ]
+      },
+      "description": "summary.md and every technical file a finding or refuted row names; the run directory holds these and report-data.json, nothing else (K19)."
+    }
+  },
+  "definitions": {
+    "ref": {
+      "type": "string",
+      "pattern": "^TASK-[0-9]+#[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "repo": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "severity": {
+      "type": "string",
+      "enum": [
+        "critical",
+        "high",
+        "medium",
+        "low"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "new",
+        "still_open",
+        "fixed",
+        "regressed"
+      ]
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "technicalFile": {
+      "type": "string",
+      "pattern": "^technical-[a-z0-9]+(?:-[a-z0-9]+)*\\.md$"
+    },
+    "note": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "parent"
+          ],
+          "properties": {
+            "kind": {
+              "const": "fork"
+            },
+            "parent": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "public"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

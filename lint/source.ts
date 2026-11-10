@@ -245,8 +245,8 @@ export function isKbTextEvidence(rel: string): boolean {
 }
 
 export interface KbSource {
-  /** One discovery task's findings directory, or milestone 0's one assessment file. */
-  kind: "findings" | "assessment";
+  /** One discovery task's findings directory, milestone 0's one assessment file, or a security report's run directory. */
+  kind: "findings" | "assessment" | "security-report";
   /** `knowledge-base/<YYYY>/<MM>/<DD>/TASK-<n>` (findings) or the assessment's path; the given path in the directory mode. */
   label: string;
   /** Findings: the directory's `TASK-<n>`; `null` when the layout does not name one. */
@@ -262,6 +262,10 @@ export interface KbSource {
   /** K1 findings made while reading the layout. */
   layout: string[];
   notes: string[];
+  /** A security report's run directory: the review id its name carries; `null` when the layout does not name one. */
+  reviewId?: string | null;
+  /** A security report's run directory: `report-data.json` as the base branch holds it (its first commit), when it does. */
+  firstData?: string | null;
 }
 
 function realDay(y: string, m: string, d: string): boolean {
@@ -297,6 +301,113 @@ function checkAssessmentName(path: string, src: KbSource): void {
   if (!realDay(y, mo, d)) src.layout.push(`\`${path}\` does not end in a real calendar date`);
 }
 
+// ── A Code Security report's run directory (design alissa-code-security-reports §4.1, §4.3, lane CSR-2)
+
+export const SECURITY_REPORTS_ROOT = `${KB_ROOT}/security-reports`;
+/** `knowledge-base/security-reports/<yyyy-mm-dd>-<reviewId>`: the review's `createdAt` day (UTC) and its id. */
+export const SECURITY_REPORT_DIR_RE = /^knowledge-base\/security-reports\/([0-9]{4})-([0-9]{2})-([0-9]{2})-([a-z0-9]{1,64})$/;
+export const SECURITY_REPORT_DATA_FILE = "report-data.json";
+const SECURITY_REPORT_HOLDS = "a run directory is flat: `report-data.json`, `summary.md` and `technical-<repo-slug>.md` files, regular files only";
+
+/** K1 over a run directory's repository path; fills `day` and `reviewId` when they are well formed. */
+function checkSecurityReportDir(dir: string, src: KbSource): void {
+  const m = SECURITY_REPORT_DIR_RE.exec(dir);
+  if (!m) {
+    src.layout.push(`\`${dir}\` is not \`${SECURITY_REPORTS_ROOT}/<yyyy-mm-dd>-<reviewId>\` — a security report is one run directory per review (alissa-code-security-reports §4.1)`);
+    return;
+  }
+  const [, y, mo, d, id] = m as unknown as [string, string, string, string, string];
+  if (!realDay(y, mo, d)) src.layout.push(`\`${dir}\` does not start with a real calendar date`);
+  else src.day = `${y}-${mo}-${d}`;
+  src.reviewId = id;
+}
+
+/**
+ * K1 on a pull request that touches `knowledge-base/security-reports/**`: every change is inside one
+ * run directory, one level deep, and only adds files — a merged report file is never edited (the
+ * record is immutable, §4.4). An edited `report-data.json` is K19's finding ("changed after its
+ * first commit"), so its base text is kept. Every regular file of the directory at `head` is read,
+ * the ones already merged included: the rules judge the run directory as it will stand.
+ */
+function readSecurityReportChanges(repo: string, base: string, head: string, kbChanges: Array<{ status: string; path: string }>, layout: string[]): KbSource {
+  const dirs = new Set<string>();
+  for (const c of kbChanges) {
+    const segs = c.path.split("/");
+    if (segs[1] !== "security-reports" || segs.length < 4) layout.push(`the diff touches \`${c.path}\` — a security report PR touches one \`${SECURITY_REPORTS_ROOT}/<yyyy-mm-dd>-<reviewId>/\` directory and nothing else`);
+    else {
+      dirs.add(segs.slice(0, 3).join("/"));
+      if (segs.length > 4) layout.push(`\`${c.path}\` is a nested path — ${SECURITY_REPORT_HOLDS}`);
+    }
+  }
+  if (dirs.size !== 1) {
+    if (dirs.size > 1) layout.push(`the diff touches ${dirs.size} security report directories (${[...dirs].sort().map((d) => `\`${d}\``).join(", ")}) — exactly one per PR`);
+    const src = emptyKb("security-report", `${SECURITY_REPORTS_ROOT}/`);
+    src.layout.push(...layout);
+    return src;
+  }
+  const dir = [...dirs][0] as string;
+  const src = emptyKb("security-report", dir);
+  src.layout.push(...layout);
+  checkSecurityReportDir(dir, src);
+  for (const c of kbChanges) {
+    if (!c.path.startsWith(`${dir}/`) || c.status === "A") continue;
+    if (c.path === `${dir}/${SECURITY_REPORT_DATA_FILE}` && c.status.charAt(0) === "M") continue;
+    src.layout.push(`\`${c.path}\` is ${statusWord(c.status)} — a merged report file is never edited (alissa-code-security-reports §4.4)`);
+  }
+  const dataPath = `${dir}/${SECURITY_REPORT_DATA_FILE}`;
+  if (gitOk(repo, ["cat-file", "-e", `${base}:${dataPath}`])) src.firstData = git(repo, ["cat-file", "blob", `${base}:${dataPath}`]).toString("utf8");
+  const tree = git(repo, ["ls-tree", "-r", "-z", "--full-tree", head, "--", `${dir}/`]).toString("utf8");
+  for (const rec of tree.split("\0").filter((r) => r !== "")) {
+    const m = /^(\d{6}) (\w+) ([0-9a-f]+)\t(.*)$/s.exec(rec);
+    if (!m) continue;
+    const [, mode, type, sha, path] = m as unknown as [string, string, string, string, string];
+    const rel = path.slice(`${dir}/`.length);
+    if (type !== "blob" || (mode !== "100644" && mode !== "100755")) {
+      src.layout.push(`\`${rel}\` is ${mode === "120000" ? "a symbolic link" : type === "commit" ? "a submodule" : `mode ${mode}`} — ${SECURITY_REPORT_HOLDS}`);
+      continue;
+    }
+    if (rel.includes("/")) continue; // a nested path, already K1's finding when the diff added it
+    const size = Number(git(repo, ["cat-file", "-s", sha]).toString("utf8").trim());
+    src.sizes.set(rel, size);
+    if (size <= READ_CAP_BYTES) src.files.set(rel, git(repo, ["cat-file", "blob", sha]).toString("utf8"));
+    else src.layout.push(`\`${rel}\` is ${size} bytes — past the ${READ_CAP_BYTES}-byte read cap`);
+  }
+  return src;
+}
+
+/** `--kb <run-dir>`: the directory's regular files, flat. */
+function readSecurityReportDir(abs: string, label: string, repoPath: string): KbSource {
+  const src = emptyKb("security-report", label);
+  checkSecurityReportDir(repoPath, src);
+  for (const name of readdirSync(abs).sort()) {
+    const entry = lstatSync(join(abs, name));
+    if (entry.isSymbolicLink()) src.layout.push(`\`${name}\` is a symbolic link — ${SECURITY_REPORT_HOLDS}`);
+    else if (entry.isDirectory()) src.layout.push(`\`${name}/\` is a directory — ${SECURITY_REPORT_HOLDS}`);
+    else if (!entry.isFile()) src.layout.push(`\`${name}\` is not a regular file — ${SECURITY_REPORT_HOLDS}`);
+    else {
+      src.sizes.set(name, entry.size);
+      if (entry.size <= READ_CAP_BYTES) src.files.set(name, readFileSync(join(abs, name), "utf8"));
+      else src.layout.push(`\`${name}\` is ${entry.size} bytes — past the ${READ_CAP_BYTES}-byte read cap`);
+    }
+  }
+  return src;
+}
+
+/**
+ * The directory mode's immutability for a run directory: a file the base branch holds must be
+ * byte-equal here (a report file merged by an earlier task's PR); `report-data.json`'s base text is
+ * kept for K19.
+ */
+function checkSecurityReportBase(where: string, ref: string, repoPath: string, src: KbSource): void {
+  for (const [name, text] of src.files) {
+    const spec = `${ref}:${repoPath}/${name}`;
+    if (!gitOk(where, ["cat-file", "-e", spec])) continue;
+    const merged = git(where, ["cat-file", "blob", spec]).toString("utf8");
+    if (name === SECURITY_REPORT_DATA_FILE) src.firstData = merged;
+    else if (merged !== text) src.layout.push(`\`${repoPath}/${name}\` already exists on the base branch (${ref}) with other content — a merged report file is never edited (alissa-code-security-reports §4.4)`);
+  }
+}
+
 /**
  * K1 on a pull request: the diff touches exactly one new `knowledge-base/<YYYY>/<MM>/<DD>/TASK-<n>/`
  * directory holding `findings.md` and, optionally, a flat `evidence/` folder — or, for milestone 0's design task, exactly one
@@ -315,6 +426,8 @@ function readKbChanges(repo: string, base: string, head: string, changes: Array<
         : `the diff touches \`${c.path}\` outside \`${KB_ROOT}/\` — a knowledge-base PR touches its one new directory and nothing else`,
     );
   }
+
+  if (kbChanges.some((c) => c.path.startsWith(`${SECURITY_REPORTS_ROOT}/`))) return readSecurityReportChanges(repo, base, head, kbChanges, layout);
 
   if (assessments.length > 0) {
     const src = emptyKb("assessment", assessments[0]?.path ?? `${KB_ROOT}/assessments/`);
@@ -410,7 +523,8 @@ function readBlob(repo: string, head: string, path: string, rel: string, src: Kb
 
 /**
  * The directory mode for `--kb <path>`: a findings directory (`…/knowledge-base/<YYYY>/<MM>/<DD>/
- * TASK-<n>/`) or one assessment file (`…/knowledge-base/assessments/<slug>-<date>.md`). The path's
+ * TASK-<n>/`), one assessment file (`…/knowledge-base/assessments/<slug>-<date>.md`) or a security
+ * report's run directory (`…/knowledge-base/security-reports/<yyyy-mm-dd>-<reviewId>/`). The path's
  * last segments name it, wherever the checkout lives. `base` works as `readPlanDir`'s does.
  */
 export function readKbDir(path: string, base?: string | null): KbSource {
@@ -425,7 +539,10 @@ export function readKbDir(path: string, base?: string | null): KbSource {
   const label = path.replace(/\/+$/, "");
   let src: KbSource;
   let repoPath: string;
-  if (st.isFile() && segs.at(-2) === "assessments") {
+  if (st.isDirectory() && segs.at(-2) === "security-reports") {
+    repoPath = segs.slice(-3).join("/");
+    src = readSecurityReportDir(abs, label, repoPath);
+  } else if (st.isFile() && segs.at(-2) === "assessments") {
     repoPath = segs.slice(-3).join("/");
     src = emptyKb("assessment", label);
     checkAssessmentName(repoPath, src);
@@ -457,7 +574,7 @@ export function readKbDir(path: string, base?: string | null): KbSource {
     }
     if (!src.sizes.has(FINDINGS_FILE)) src.layout.push(`\`${FINDINGS_FILE}\` is missing`);
   } else {
-    throw new UsageError(`${path}: --kb takes a knowledge-base/<YYYY>/<MM>/<DD>/TASK-<n>/ directory or a knowledge-base/assessments/*.md file`);
+    throw new UsageError(`${path}: --kb takes a knowledge-base/<YYYY>/<MM>/<DD>/TASK-<n>/ directory, a knowledge-base/assessments/*.md file or a knowledge-base/security-reports/<yyyy-mm-dd>-<reviewId>/ directory`);
   }
 
   if (base === null) {
@@ -475,7 +592,8 @@ export function readKbDir(path: string, base?: string | null): KbSource {
   assertRev(ref, "--base");
   if (!inRepo) throw new UsageError(`${path} is not inside a git work tree, so --base cannot be read`);
   if (!gitOk(where, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`])) throw new UsageError(`--base ${ref} does not resolve to a commit`);
-  if (gitOk(where, ["cat-file", "-e", `${ref}:${repoPath}`])) {
+  if (src.kind === "security-report") checkSecurityReportBase(where, ref, repoPath, src);
+  else if (gitOk(where, ["cat-file", "-e", `${ref}:${repoPath}`])) {
     src.layout.push(`\`${repoPath}\` already exists on the base branch (${ref}) — a merged ${src.kind === "findings" ? "finding" : "assessment"} is never edited (§4.2)`);
   }
   return src;

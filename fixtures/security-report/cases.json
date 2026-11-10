@@ -1,0 +1,15 @@
+{
+  "clean": "clean",
+  "failing": [
+    { "dir": "k19-data-sha", "rule": "K19", "file": "summary.md", "change": "dataSha256 is not the sha256 of report-data.json" },
+    { "dir": "k20-numbers", "rule": "K20", "file": "summary.md", "change": "prose says two critical findings; the data file has one critical" },
+    { "dir": "k20-es-qualifier", "rule": "K20", "file": "summary.md", "change": "es-MX prose says \"2 hallazgos críticos\"; the data file has one critical (the adjective after the noun decides)" },
+    { "dir": "k21-refs", "rule": "K21", "file": "technical-chains.md", "change": "names TASK-1099#q9, which is not in the data file" },
+    { "dir": "k22-status", "rule": "K22", "file": "technical-acme-shop-storefront.md", "change": "a Not re-verified finding's badge says kept" },
+    { "dir": "k23-exposure", "rule": "K23", "file": "summary.md", "change": "a path:line cite in the summary" }
+  ],
+  "passing": [
+    { "dir": "pass-es-qualifier", "change": "es-MX prose says \"1 hallazgos críticos\", which is true (1 critical) although 1 is no findings count" },
+    { "dir": "pass-title-upgrade-word", "change": "a Not re-verified finding titled \"Receipt uploads are never verified\": its heading and a summary line carry the title (data file, sha lines and heading regenerated)" }
+  ]
+}

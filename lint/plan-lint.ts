@@ -4,21 +4,23 @@
 //   plan-lint [--offline] [--base <ref> | --no-base] <plan-dir>
 //   plan-lint --write [--offline] [--base <ref> | --no-base] <plan-dir>
 //   plan-lint --pr --base <rev> --head <rev> [--repo <path>] [--offline]
-//   plan-lint --kb <findings-dir | assessment.md> [--offline] [--base <ref> | --no-base] [--task TASK-<n>]
+//   plan-lint --kb <findings-dir | assessment.md | security-report-dir> [--offline] [--base <ref> | --no-base] [--task TASK-<n>]
 //   plan-lint --ic <run-dir> [--offline] [--base <ref> | --no-base] [--task TASK-<n>]
 //
 // Rules 1–9 need no network; rules 10–12 read Alissa with ALISSA_API_TOKEN (ALISSA_BASE overrides
 // https://api.alissa.app), and rule 5b reads each task's repository on GitHub (GITHUB_TOKEN or
 // GH_TOKEN when set; GITHUB_API_URL overrides https://api.github.com). --offline runs rules 1–9 only. --summary-file <path> appends a Markdown
 // report; --check-output <path> writes { conclusion, title, summary } for a check run.
-// A pull request that changes any knowledge-base/** file is linted in the knowledge-base mode, K1–K18
+// A pull request that changes any knowledge-base/** file is linted in the knowledge-base mode, K1–K23
 // (design alissa-build-discovery §3.4; K10–K14, a question's `security` block, alissa-security-review
 // §5.2; K15–K18, a question's `doc` block, alissa-documentation-check §5.2): K1–K5, K9–K16 and K18
 // offline, K6 reads the task, K7 posts the repo cites and K17 the quoted doc passages to Studio's
 // verify route, and K8 the URL cites to its url-cites route; --kb runs the same rules over a local
 // directory. A finding's report ends with its `Discovery-Review: none | light — <reasons>` line, where a
 // `critical` or `high` security block, or a `wrong` doc verdict with `fixSide: code`, counts as impact
-// `high`. A pull request that changes
+// `high`. A pull request that changes a Code Security report's run directory,
+// knowledge-base/security-reports/<yyyy-mm-dd>-<reviewId>/, is linted under K1 (from a `kind: design` task,
+// read online) and K19–K23, offline (design alissa-code-security-reports §4.3). A pull request that changes
 // any integration-check/** file is linted in the integration-check mode, I1–I9 (design
 // alissa-build-integration-check §3.5): I1, I2 and I4–I8 offline, I3 and I9 read Alissa; --ic runs
 // the same rules over a local run directory.
@@ -118,7 +120,7 @@ export function report(r: LintResult): Report {
  */
 export function reportKb(r: KbLintResult): Report {
   const ran = kRulesRan(r.rulesRun);
-  const what = r.kind === "assessment" ? "assessment" : `${r.questionCount} question(s)`;
+  const what = r.kind === "assessment" ? "assessment" : r.kind === "security-report" ? "security report" : `${r.questionCount} question(s)`;
   const head = `${r.target} — knowledge-base mode — ${what} — ${ran}`;
   const lines = [`plan-lint: ${head}`];
   const first = r.failures[0];
@@ -194,7 +196,7 @@ const USAGE = `usage:
   plan-lint [--offline] [--base <ref> | --no-base] <plan-dir>
   plan-lint --write [--offline] [--base <ref> | --no-base] <plan-dir>
   plan-lint --pr --base <rev> --head <rev> [--repo <path>] [--offline] [--task TASK-<n>]
-  plan-lint --kb <findings-dir | assessment.md> [--offline] [--base <ref> | --no-base] [--task TASK-<n>]
+  plan-lint --kb <findings-dir | assessment.md | security-report-dir> [--offline] [--base <ref> | --no-base] [--task TASK-<n>]
   plan-lint --ic <integration-check/<YYYY>/<MM>/<DD>/<milestone>> [--offline] [--base <ref> | --no-base] [--task TASK-<n>]
 options: --summary-file <path>  --check-output <path>
 env: ALISSA_API_TOKEN (rules 10–12, K6–K8, K17, I3 and I9), ALISSA_BASE (default ${DEFAULT_ALISSA_BASE}),
@@ -289,7 +291,7 @@ function readerFor(offline: boolean, env: NodeJS.ProcessEnv): Parameters<typeof 
   return { online: true, reader: httpReader({ base: env.ALISSA_BASE || DEFAULT_ALISSA_BASE, token }), github: githubReader(env) };
 }
 
-/** The knowledge-base mode's online half: K6 (and an assessment's task) through the reader, K7, K8 and K17 through Studio's verify routes. */
+/** The knowledge-base mode's online half: K6 (and an assessment's or a security report's task) through the reader, K7, K8 and K17 through Studio's verify routes. */
 function kbOptionsFor(offline: boolean, env: NodeJS.ProcessEnv, prTask: string | null): KbLintOptions {
   if (offline) return { online: false, prTask };
   const token = env.ALISSA_API_TOKEN;
