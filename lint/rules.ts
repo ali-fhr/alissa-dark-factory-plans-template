@@ -2562,6 +2562,25 @@ export function securityReportLint(input: SecurityReportLintInput): KbFailure[] 
   return out;
 }
 
+/**
+ * A Report plan's data file (alissa-code-security-reports §4.1): the one `report-data.json` a plan PR
+ * may add beside its plan, linted with K19's data-file checks — the schema, its arithmetic, canonical
+ * form, the run directory's name against its review and day, and never changed after its first
+ * commit — in the same run as the plan's rules. K1 here is the file's own layout (its run directory's
+ * name, a regular file); the plan PR's other paths are rule 1's. No report file rides with it, so
+ * K20–K23 have nothing to read; the Report tasks' later PRs run the whole of K1, K19–K23.
+ */
+export function lintReportData(src: KbSource): KbLintResult {
+  const failures: KbFailure[] = src.layout.map((message) => ({ rule: "K1" as KRule, message }));
+  const data = src.files.get(SECURITY_REPORT_DATA_FILE);
+  if (src.sizes.has(SECURITY_REPORT_DATA_FILE) || src.layout.length === 0) {
+    const only = data === undefined ? new Map<string, string>() : new Map([[SECURITY_REPORT_DATA_FILE, data]]);
+    for (const f of securityReportLint({ files: only, firstData: src.firstData ?? null, day: src.day, reviewId: src.reviewId ?? null })) failures.push(f);
+  }
+  const notes = [...src.notes, "a Report plan's data file: K19's data-file checks; the report files come from the Report tasks' pull requests (K1, K19–K23)"];
+  return { target: src.label, kind: "security-report", questionCount: 0, failures: sortKb(failures), rulesRun: ["K1", "K19"], notes, review: null };
+}
+
 // ── The integration-check mode: I1–I9 (design alissa-build-integration-check §3.5) ───────────────
 // A pull request that changes any `integration-check/**` file is linted under these rules, numbered
 // apart from §5.5's and the K rules. I1, I2 and I4–I8 need no network; I3 reads the milestone's

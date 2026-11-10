@@ -14,7 +14,7 @@ import {
   securityReportCountsTableOf, securityReportDataJsonOf, securityReportSchemas,
 } from "../rules.ts";
 import { readKbDir } from "../source.ts";
-import { type FakeAlissa, FIXTURES, cliEnv, commitAll, fakeAlissa, git, initRepo, kbOnlineAgainst, runCli, tempDir } from "./helpers.ts";
+import { type FakeAlissa, FIXTURES, cliEnv, commitAll, fakeAlissa, fixturePlan, git, initRepo, kbOnlineAgainst, runCli, tempDir } from "./helpers.ts";
 
 const SR = join(FIXTURES, "security-report");
 /** The run directory every fixture case is linted under: its data file's review day and id. */
@@ -34,9 +34,12 @@ interface Cases {
 }
 const cases = JSON.parse(readFileSync(join(SR, "cases.json"), "utf8")) as Cases;
 
-/** The git tree id of a directory on disk, as `git rev-parse <rev>:<dir>` names it. */
-function gitTreeId(dir: string): string {
-  const entries = readdirSync(dir).map((name) => {
+/** The template's own fixture directory under `fixtures/security-report/` (lane CSR-2b): not Studio's, so the pin leaves it out. */
+const PLAN_PR = "plan-pr";
+
+/** The git tree id of a directory on disk, as `git rev-parse <rev>:<dir>` names it, leaving out the entries named in `skip`. */
+function gitTreeId(dir: string, skip: readonly string[] = []): string {
+  const entries = readdirSync(dir).filter((name) => !skip.includes(name)).map((name) => {
     const full = join(dir, name);
     const isDir = statSync(full).isDirectory();
     const id = isDir ? gitTreeId(full) : createHash("sha1").update(Buffer.concat([Buffer.from(`blob ${statSync(full).size}\0`), readFileSync(full)])).digest("hex");
@@ -76,8 +79,8 @@ after(async () => {
 });
 
 describe("CSR-1's fixtures, copied byte for byte", () => {
-  it("are Studio's tree at the pinned commit", () => {
-    assert.equal(gitTreeId(SR), STUDIO_FIXTURES_TREE);
+  it("are Studio's tree at the pinned commit (the template's own plan-pr/ left out)", () => {
+    assert.equal(gitTreeId(SR, [PLAN_PR]), STUDIO_FIXTURES_TREE);
   });
 
   it("cases.json names a clean case, a failing case for each of K19–K23 and passing cases", () => {
@@ -277,17 +280,22 @@ describe("--pr on a security report's run directory", () => {
     assert.doesNotMatch(run.stdout, /technical-acme-shop-storefront\.md` exists on the base branch/);
   });
 
-  it("refuses a PR that mixes the run directory with a finding or a plan", async () => {
+  it("refuses a PR that mixes the run directory with a finding, or a report file with a plan", async () => {
     const a = reportRepo([]);
     cpSync(join(SR, cases.clean, "technical-chains.md"), join(a.dir, "technical-chains.md"));
     mkdirSync(join(a.repo, "knowledge-base/2026/11/09/TASK-1040"), { recursive: true });
     writeFileSync(join(a.repo, "knowledge-base/2026/11/09/TASK-1040/findings.md"), "---\n---\n");
-    mkdirSync(join(a.repo, "plans/2026-11-10-report"), { recursive: true });
-    writeFileSync(join(a.repo, "plans/2026-11-10-report/plan.md"), "---\n---\n");
     const run = await runCli(prArgs(a.repo, a.base, commitAll(a.repo, "mix")), env());
     assert.equal(run.status, 1);
     assert.match(run.stdout, /the diff touches `knowledge-base\/2026\/11\/09\/TASK-1040\/findings\.md` — a security report PR touches one/);
-    assert.match(run.stdout, /the diff touches `plans\/2026-11-10-report\/plan\.md` — a knowledge-base PR never carries a plan/);
+
+    // A plan beside a run directory is a Report plan's PR (§4.1): rule 1 refuses every path but the data file.
+    mkdirSync(join(a.repo, "plans/2026-11-10-report"), { recursive: true });
+    writeFileSync(join(a.repo, "plans/2026-11-10-report/plan.md"), "---\n---\n");
+    const plan = await runCli([...prArgs(a.repo, a.base, commitAll(a.repo, "and a plan")), "--offline"], env());
+    assert.equal(plan.status, 1);
+    assert.match(plan.stdout, /rule 1 \(layout and immutability\): the diff touches `knowledge-base\/security-reports\/2026-11-09-k17acmereview0001\/technical-chains\.md` — a plan PR adds only its run directory's `report-data\.json`/);
+    assert.match(plan.stdout, /rule 1 \(layout and immutability\): the diff touches `knowledge-base\/2026\/11\/09\/TASK-1040\/findings\.md` outside `plans\/`/);
   });
 
   it("refuses a PR from a code task (K1 online)", async () => {
@@ -296,6 +304,139 @@ describe("--pr on a security report's run directory", () => {
     const run = await runCli(prArgs(a.repo, a.base, commitAll(a.repo, "chains")), { ...cliEnv(api), GITHUB_HEAD_REF: "TASK-2001-report" });
     assert.equal(run.status, 1);
     assert.match(run.stdout, /FAIL K1 \(layout and immutability\): the PR's task `TASK-2001` is `kind: code`/);
+  });
+});
+
+describe("a Report plan's PR adds its run directory's report-data.json (§4.1, lane CSR-2b)", () => {
+  const PLAN_ID = "2026-09-28-golden-plan";
+  const DATA = `${RUN}/report-data.json`;
+  /** A plans repository on `main`; `merged` lays the data file on the base branch first (an earlier plan PR). */
+  function planRepo(merged = false): { repo: string; base: string } {
+    const repo = initRepo();
+    if (merged) {
+      mkdirSync(join(repo, RUN), { recursive: true });
+      cpSync(join(SR, PLAN_PR, "report-data.json"), join(repo, DATA));
+      commitAll(repo, "an earlier Report plan");
+    }
+    const base = git(repo, "rev-parse", "HEAD");
+    git(repo, "checkout", "-q", "-b", "PLAN-20260928T000000Z-golden-plan");
+    mkdirSync(join(repo, "plans"), { recursive: true });
+    cpSync(fixturePlan("golden"), join(repo, "plans", PLAN_ID), { recursive: true });
+    return { repo, base };
+  }
+  /** Adds the fixture's data file under `run` (default: its own review's run directory). */
+  function addData(repo: string, run = RUN): void {
+    mkdirSync(join(repo, run), { recursive: true });
+    cpSync(join(SR, PLAN_PR, "report-data.json"), join(repo, run, "report-data.json"));
+  }
+  async function lintPlanPr(repo: string, base: string, message: string): Promise<{ status: number | null; stdout: string; stderr: string; check: { conclusion: string; title: string; summary: string } }> {
+    const head = commitAll(repo, message);
+    const out = join(tempDir("plan-pr"), "check.json");
+    const run = await runCli(["--pr", "--offline", "--repo", repo, "--base", base, "--head", head, "--check-output", out]);
+    return { ...run, check: JSON.parse(readFileSync(out, "utf8")) as { conclusion: string; title: string; summary: string } };
+  }
+
+  it("the fixture's data file is clean/'s, byte for byte", () => {
+    assert.deepEqual(readFileSync(join(SR, PLAN_PR, "report-data.json")), readFileSync(join(SR, cases.clean, "report-data.json")));
+  });
+
+  it("passes a plan PR that adds one run directory's report-data.json, and names both verdicts", async () => {
+    const { repo, base } = planRepo();
+    addData(repo);
+    const run = await lintPlanPr(repo, base, "plan + data");
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.match(run.stdout, /^plan-lint: plans\/2026-09-28-golden-plan — 2 task\(s\) — plan class: drift-fix/m);
+    assert.match(run.stdout, /^plan-lint: PASS$/m);
+    assert.match(run.stdout, new RegExp(`^plan-lint: data file ${DATA} — K19's data-file checks — K1, K19$`, "m"));
+    assert.match(run.stdout, /^plan-lint: data file PASS$/m);
+    assert.equal(run.check.conclusion, "success");
+    assert.match(run.check.title, /^PASS — plans\/2026-09-28-golden-plan — plan class drift-fix — data file PASS$/);
+    assert.match(run.check.summary, /\*\*plan-lint\*\* · `plans\/2026-09-28-golden-plan`[\s\S]*\*\*Data file\*\* · `knowledge-base\/security-reports\/2026-11-09-k17acmereview0001\/report-data\.json`[\s\S]*\*\*PASS\*\*/);
+  });
+
+  it("refuses a second data file (a second run directory), naming its path", async () => {
+    const { repo, base } = planRepo();
+    addData(repo);
+    addData(repo, "knowledge-base/security-reports/2026-11-09-k17acmereview0002");
+    const run = await lintPlanPr(repo, base, "plan + two data files");
+    assert.equal(run.status, 1, run.stdout);
+    assert.match(run.stdout, /FAIL rule 1 \(layout and immutability\): the diff touches `knowledge-base\/security-reports\/2026-11-09-k17acmereview0002\/report-data\.json` — a plan PR adds at most one run directory's `report-data\.json`/);
+    assert.match(run.check.title, /^FAIL — rule 1 \(layout and immutability\) — plans\/2026-09-28-golden-plan — data file PASS$/);
+  });
+
+  it("refuses a summary.md or a technical file beside the data file, naming its path", async () => {
+    for (const file of ["summary.md", "technical-chains.md"]) {
+      const { repo, base } = planRepo();
+      addData(repo);
+      cpSync(join(SR, cases.clean, file), join(repo, RUN, file));
+      const run = await lintPlanPr(repo, base, `plan + data + ${file}`);
+      assert.equal(run.status, 1, run.stdout);
+      assert.match(run.stdout, new RegExp(`FAIL rule 1 \\(layout and immutability\\): the diff touches \`${RUN}/${file.replace(".", "\\.")}\` — a plan PR adds only its run directory's \`report-data\\.json\`; the report files come from the Report tasks' own pull requests`));
+      assert.match(run.stdout, /^plan-lint: data file PASS$/m, "the data file itself is still judged");
+    }
+  });
+
+  it("refuses a modified data file: rule 1 (only adds) and K19 (changed after its first commit)", async () => {
+    const { repo, base } = planRepo(true);
+    replaceIn(join(repo, DATA), '"reason": "repos_cap"', '"reason": "repos_capped"');
+    const run = await lintPlanPr(repo, base, "plan + edited data");
+    assert.equal(run.status, 1, run.stdout);
+    assert.match(run.stdout, new RegExp(`FAIL rule 1 \\(layout and immutability\\): \`${DATA}\` is modified — a plan PR only adds its run directory's data file`));
+    assert.match(run.stdout, /^plan-lint: data file FAIL K19 \(report shape\) — report-data\.json: changed after its first commit/m);
+    assert.match(run.check.title, /— data file FAIL — K19 \(report shape\)$/);
+  });
+
+  it("refuses a data file that fails K19 (a wrong count), with the plan's own verdict PASS", async () => {
+    const { repo, base } = planRepo();
+    addData(repo);
+    replaceIn(join(repo, DATA), '"findings": 5,', '"findings": 6,');
+    const run = await lintPlanPr(repo, base, "plan + miscounted data");
+    assert.equal(run.status, 1, run.stdout);
+    assert.match(run.stdout, /^plan-lint: PASS$/m);
+    assert.match(run.stdout, /^plan-lint: data file FAIL K19 \(report shape\) — report-data\.json: counts\.findings: 6, but the data holds 5/m);
+    assert.equal(run.check.conclusion, "failure");
+    assert.equal(run.check.title, `FAIL — K19 (report shape) — ${DATA} — plan PASS`);
+  });
+
+  it("refuses a data file whose run directory is not its review's (K19)", async () => {
+    const { repo, base } = planRepo();
+    addData(repo, "knowledge-base/security-reports/2026-11-10-k17acmereview0001");
+    const run = await lintPlanPr(repo, base, "plan + data in the wrong run directory");
+    assert.equal(run.status, 1, run.stdout);
+    assert.match(run.stdout, /data file FAIL K19 \(report shape\) — report-data\.json: the run directory is `2026-11-10-k17acmereview0001`, but the data file's review is `2026-11-09-k17acmereview0001`/);
+  });
+
+  it("still refuses any other knowledge-base/** path in a plan PR under rule 1", async () => {
+    const { repo, base } = planRepo();
+    addData(repo);
+    mkdirSync(join(repo, "knowledge-base/2026/11/09/TASK-1040"), { recursive: true });
+    writeFileSync(join(repo, "knowledge-base/2026/11/09/TASK-1040/findings.md"), "---\n---\n");
+    const run = await lintPlanPr(repo, base, "plan + data + finding");
+    assert.equal(run.status, 1, run.stdout);
+    assert.match(run.stdout, /FAIL rule 1 \(layout and immutability\): the diff touches `knowledge-base\/2026\/11\/09\/TASK-1040\/findings\.md` outside `plans\/` — a plan PR touches its own new directory and nothing else/);
+
+    // Without a run directory the PR keeps today's route: the knowledge-base mode refuses the plan (K1).
+    const bare = planRepo();
+    mkdirSync(join(bare.repo, "knowledge-base/2026/11/09/TASK-1040"), { recursive: true });
+    writeFileSync(join(bare.repo, "knowledge-base/2026/11/09/TASK-1040/findings.md"), "---\n---\n");
+    const kb = await lintPlanPr(bare.repo, bare.base, "plan + finding");
+    assert.equal(kb.status, 1, kb.stdout);
+    assert.match(kb.stdout, /the diff touches `plans\/2026-09-28-golden-plan\/plan\.md` — a knowledge-base PR never carries a plan/);
+  });
+
+  it("a Report task's later PR keeps K1's route, the plan PR's data file counting as merged", async () => {
+    const { repo } = planRepo();
+    addData(repo);
+    commitAll(repo, "plan + data");
+    git(repo, "checkout", "-q", "main");
+    git(repo, "merge", "-q", "--no-ff", "-m", "merge the plan", "PLAN-20260928T000000Z-golden-plan");
+    const base = git(repo, "rev-parse", "HEAD");
+    git(repo, "checkout", "-q", "-b", "TASK-2000-report-chains");
+    cpSync(join(SR, cases.clean, "technical-chains.md"), join(repo, RUN, "technical-chains.md"));
+    const head = commitAll(repo, "chains report");
+    const run = await runCli(["--pr", "--repo", repo, "--base", base, "--head", head], { ...cliEnv(api), GITHUB_HEAD_REF: "TASK-2000-report-chains" });
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.match(run.stdout, new RegExp(`^plan-lint: ${RUN} — knowledge-base mode — security report — K1, K19–K23$`, "m"));
   });
 });
 
@@ -327,6 +468,11 @@ describe("the schemas, the shared renderings and the stamp", () => {
   it("names K19–K23 and reports a run as `K1, K19–K23`", () => {
     assert.deepEqual(Object.keys(K_RULE_NAMES).slice(-5), ["K19", "K20", "K21", "K22", "K23"]);
     assert.equal(kRulesRan(RULES), "K1, K19–K23");
+  });
+
+  it("lint/VERSION says a plan PR may add its run directory's data file (lane CSR-2b)", () => {
+    const lines = readFileSync(new URL("../VERSION", import.meta.url), "utf8").split("\n");
+    assert.ok(lines.includes("security-report-plan-data: report-data.json"), lines.join("\n"));
   });
 
   it("lint/VERSION names both report schemas", () => {
