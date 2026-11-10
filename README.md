@@ -401,9 +401,12 @@ questions:
       key: shop-api.authz.order-refund     # stable across runs, [a-z0-9.-]{1,80}, unique in the file (K11)
       severity: high                       # critical | high | medium | low
       category: authz                      # authz | money | injection | storage | secrets | supply_chain | container
+                                           #   | abuse (v1.4)
       consequence: money                   # money | data | security | correctness | leak | alarm | stall | contract
                                            #   | cosmetic | redundant-test | hypothetical
       reachable: yes                       # yes | no | unknown
+      precondition: invited                # v1.4: none | self_serve | invited | privileged — required on money,
+                                           #   data and security
       scenario: >-                         # ≤ 1,200 characters: who, from where, gets what
         …
       fix: >-                              # ≤ 800 characters
@@ -425,6 +428,24 @@ questions:
 The block does not say whether a `security` consequence sits behind a sign-in, so K10 reads both of
 its rows: `critical` or `high`. A severity one step from the table passes; further needs a
 `calibration` reason (the Verify milestone's stated reason, shown beside the severity in the report).
+
+**v1.4 — the precondition pins the row** (Studio issue #4754). `schema: alissa-findings/v1.4` widens the
+block: `category` gains `abuse` (availability, cost or misuse a caller can cause without breaking
+authz; refused in a v1.3 file), and `precondition` names who can reach the effect — `none` anyone on
+the internet, `self_serve` an account anyone can create, `invited` a member the owner admitted,
+`privileged` an admin, operator or holder of a deploy secret. It is required on a `money`, `data` or
+`security` consequence (a v1.3 file carries none), and there it picks one row:
+
+| Consequence | `precondition` | `reachable: yes` or `unknown` | `reachable: no` |
+|---|---|---|---|
+| `money`, `data`, `security` | `none`, `self_serve` | `critical` | `low` |
+| `money`, `data`, `security` | `invited` | `high` | `low` |
+| `money`, `data`, `security` | `privileged` | `medium` | `low` |
+
+A block naming its precondition takes its row's severity exactly, or carries a `calibration`
+reason; K10's message names the row. A block without one (v1.3, or a consequence where it is
+optional) keeps the one-step rule above. `lint/rules.ts`'s `tableSeverities` is Studio's
+(`convex/core/findings.ts`), and `lint/test/kb.test.ts` enumerates the two against each other.
 Studio's projection keeps `severity`, `category`, `key` and `crossRun`, and reads `scenario` and
 `fix` from this repository on demand (§8). A `critical` or `high` block puts its question at impact
 `high` on the review line below.
@@ -497,7 +518,7 @@ never *nothing to lint* — under the K rules, numbered apart from §5.5's:
 | K7 | cites resolve | a cited path that does not exist at its `reads` SHA, whose blob differs from `blob`, or whose line range runs past the file's end — asked of Studio, never of GitHub | Studio |
 | K8 | external cites hold | a URL cite whose page is `refuted` (it answers, and neither it nor the archive holds the quote), `gone` (404 or 410, and no archive holds it) or `blocked` (401, 403, 429, a paywall, or a URL Studio's fetch guard refuses, and no archive); `unavailable` (a 5xx or a timeout) is *plan-lint could not run*. `archived` — only the archive holds the quote — passes, and the projection marks the cite stale. Asked of Studio, never fetched from the runner | Studio |
 | K9 | evidence cited | an `evidence/` file that `findings.md` never cites; an `evidence:<file>` cite — inline or `{ kind: evidence, file }` — naming a file that is not in the folder | — |
-| K10 | security shape | a `security` block that fails the schema (a field missing or off its list, a `scenario` over 1,200 characters or a `fix` over 800, a block in a file before v1.3); a `severity` more than one step from §5.1's table with no `calibration` reason | — |
+| K10 | security shape | a `security` block that fails the schema (a field missing or off its list, a `scenario` over 1,200 characters or a `fix` over 800, a block in a file before v1.3, a `precondition` or `category: abuse` before v1.4, a v1.4 `money`, `data` or `security` block with no `precondition`); a `severity` more than one step from §5.1's table with no `calibration` reason, or — when the block names its `precondition` — any departure from its row with no `calibration` reason | — |
 | K11 | security key | two questions in one file sharing a `security.key`; a key that is not `[a-z0-9.-]{1,80}` | — |
 | K12 | cited finding | a `security` block on a question that is not `answered` or `partial`, or whose `cites` hold no repo or evidence cite (a URL cite alone does not ground it) | — |
 | K13 | no secrets in scenario | a `scenario` or `fix` carrying a secret-shaped string (K5's token shapes), a full URL to a host other than `github.com`, or an IP address (v4 or v6; a v6 candidate counts only with a decimal digit or three or more non-empty groups, so hex-only `::` symbol paths like `db::add` pass — and so does an all-letter address of at most two groups, like `fd::`, a known false negative) — named by kind and count, never quoted | — |
@@ -617,6 +638,8 @@ review's creation day (UTC):
   whose stamp lacks `alissa-findings/v1.2` and `K9` lints no `evidence/` folder; one whose stamp
   lacks `alissa-findings/v1.3` and `K10`–`K14` lints no `security` block; one whose stamp lacks
   `alissa-findings/v1.4` and `K15`–`K18` lints no `doc` block; one whose stamp lacks
+  `security-severity-table: precondition` still holds a security block to the one-step rule and
+  refuses `precondition` and `abuse` (Studio issue #4754); one whose stamp lacks
   `security-report-schemas: alissa-security-report-data/v1 alissa-security-report/v1` and `K19`–`K23`
   lints no security report; one whose stamp lacks `security-report-plan-data: report-data.json`
   refuses a Report plan's data file in its `PLAN-` pull request (lane CSR-2b).

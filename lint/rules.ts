@@ -1533,10 +1533,28 @@ export type SecuritySeverity = (typeof SECURITY_SEVERITIES)[number];
 export const SECURITY_REPOSITORY_HOSTS = ["github.com"] as const;
 
 /**
+ * v1.4 (Studio issue #4754, §5.1): who can reach the effect — `none` anyone on the internet, no
+ * account; `self_serve` an account anyone can create; `invited` a member the owner admitted;
+ * `privileged` an admin, operator or holder of a deploy secret. Required on a `money`, `data` or
+ * `security` consequence (the schema's), optional otherwise.
+ */
+export const SECURITY_PRECONDITIONS = ["none", "self_serve", "invited", "privileged"] as const;
+export type SecurityPrecondition = (typeof SECURITY_PRECONDITIONS)[number];
+/** The consequences whose v1.4 block must name its `precondition`, and whose severity it pins (§5.1). */
+export const SECURITY_PRECONDITION_CONSEQUENCES: readonly string[] = ["money", "data", "security"];
+/** The v1.4 categories: §3.2's seven areas, then `abuse` (a v1.3 file carrying it is refused, K10). */
+export const SECURITY_CATEGORIES = ["authz", "money", "injection", "storage", "secrets", "supply_chain", "container", "abuse"] as const;
+
+/**
  * §5.1's table: the severity a consequence calls for when the finding is reachable (`yes` or
  * `unknown`). `security` spans two rows — `critical` with no precondition, `high` behind an
- * authenticated user — and the block does not say which, so either is on the table for it.
- * Unreachable (`reachable: no`) is `low` for every consequence.
+ * authenticated user — and a block with no `precondition` does not say which, so either is on the
+ * table for it. Unreachable (`reachable: no`) is `low` for every consequence.
+ *
+ * v1.4 (Studio issue #4754): a block naming its `precondition` picks ONE row for `money`, `data`
+ * and `security` — `none` or `self_serve` → critical, `invited` → high, `privileged` → medium
+ * (`PRECONDITION_SEVERITY`). Every other consequence keeps its row, and unreachable stays `low`.
+ * Studio's `tableSeverities` (convex/core/findings.ts), the same table; kb.test.ts enumerates the two.
  */
 const SEVERITY_TABLE: Readonly<Record<string, readonly SecuritySeverity[]>> = {
   money: ["critical"], data: ["critical"], security: ["critical", "high"],
@@ -1544,16 +1562,24 @@ const SEVERITY_TABLE: Readonly<Record<string, readonly SecuritySeverity[]>> = {
   cosmetic: ["low"], "redundant-test": ["low"], hypothetical: ["low"],
 };
 
-/** The severities §5.1's table gives a consequence at a reachability. */
-export function tableSeverities(consequence: string, reachable: string): readonly SecuritySeverity[] {
+/** §5.1's v1.4 rows (Studio issue #4754): the one severity a `money`, `data` or `security` consequence takes behind a precondition. */
+export const PRECONDITION_SEVERITY: Readonly<Record<SecurityPrecondition, SecuritySeverity>> = {
+  none: "critical", self_serve: "critical", invited: "high", privileged: "medium",
+};
+
+const isPrecondition = (p: unknown): p is SecurityPrecondition => typeof p === "string" && (SECURITY_PRECONDITIONS as readonly string[]).includes(p);
+
+/** The severities §5.1's table gives a consequence at a reachability, behind `precondition` when the block names one. */
+export function tableSeverities(consequence: string, reachable: string, precondition?: SecurityPrecondition): readonly SecuritySeverity[] {
   if (reachable === "no") return ["low"];
+  if (precondition !== undefined && SECURITY_PRECONDITION_CONSEQUENCES.includes(consequence)) return [PRECONDITION_SEVERITY[precondition]];
   return SEVERITY_TABLE[consequence] ?? [];
 }
 
 /** How many steps `severity` stands from the nearest severity the table gives (K10). */
-export function severitySteps(severity: SecuritySeverity, consequence: string, reachable: string): number {
+export function severitySteps(severity: SecuritySeverity, consequence: string, reachable: string, precondition?: SecurityPrecondition): number {
   const at = SECURITY_SEVERITIES.indexOf(severity);
-  return Math.min(...tableSeverities(consequence, reachable).map((t) => Math.abs(SECURITY_SEVERITIES.indexOf(t) - at)));
+  return Math.min(...tableSeverities(consequence, reachable, precondition).map((t) => Math.abs(SECURITY_SEVERITIES.indexOf(t) - at)));
 }
 
 /** Does a question's `security` block put it at impact `high` for the review line (§5.2)? */
@@ -1567,6 +1593,18 @@ function securitySchemaError(e: ErrorObject, fm: unknown, fail: KbFail): void {
   const doc = isRecord(fm) ? fm : {};
   const q = Array.isArray(doc.questions) ? doc.questions[Number(m[1])] : undefined;
   const id = isRecord(q) && typeof q.id === "string" ? q.id : `#${m[1]}`;
+  const sec = isRecord(q) && isRecord(q.security) ? q.security : {};
+  // v1.4's widening (Studio issue #4754), in Studio's wording: `precondition` and `abuse` need v1.4,
+  // and a `money`, `data` or `security` consequence names its precondition.
+  if (e.keyword === "false schema" && e.instancePath.endsWith("/security/precondition")) {
+    return fail("K10", `question \`${clean(id)}\`: unknown \`security\` key \`precondition\` — it is ${FINDINGS_SCHEMA_V14}'s (§5.1)`, FINDINGS_FILE);
+  }
+  if (e.keyword === "not" && e.instancePath.endsWith("/security/category")) {
+    return fail("K10", `question \`${clean(id)}\`: \`security.category\` is one of ${SECURITY_CATEGORIES.filter((c) => c !== "abuse").join(" | ")} (§3.2) — \`abuse\` needs \`schema: ${FINDINGS_SCHEMA_V14}\` (§5.1)`, FINDINGS_FILE);
+  }
+  if (e.keyword === "required" && (e.params as { missingProperty?: string }).missingProperty === "precondition") {
+    return fail("K10", `question \`${clean(id)}\`: a \`${clean(sec.consequence)}\` consequence names its \`security.precondition\` (${SECURITY_PRECONDITIONS.join(" | ")}) — who can reach the effect picks §5.1's row`, FINDINGS_FILE);
+  }
   if (e.keyword === "false schema") {
     return fail("K10", `question \`${clean(id)}\` carries a \`security\` block — it needs \`schema: ${FINDINGS_SCHEMA_V13}\` (alissa-security-review §5.1)`, FINDINGS_FILE);
   }
@@ -1589,12 +1627,19 @@ function kbSecurity(fm: Record<string, unknown>, questions: Array<Record<string,
   const blocks = securityBlocks(questions);
   const keys = new Map<string, string>();
   for (const { q, id, s } of blocks) {
-    // K10 — severity against §5.1's table: more than one step off, with no `calibration` reason.
+    // K10 — severity against §5.1's table. A block naming its precondition (v1.4) takes its row's
+    // severity exactly or carries a `calibration` reason; one without (v1.3, or a consequence where it
+    // is optional) may stand one step off, and further needs the reason.
     const severity = s.severity, consequence = s.consequence, reachable = s.reachable;
     if (typeof severity === "string" && (SECURITY_SEVERITIES as readonly string[]).includes(severity) && typeof consequence === "string" && typeof reachable === "string") {
-      const table = tableSeverities(consequence, reachable);
+      const precondition = isPrecondition(s.precondition) ? s.precondition : undefined;
+      const table = tableSeverities(consequence, reachable, precondition);
       const calibrated = typeof s.calibration === "string" && s.calibration.trim() !== "";
-      if (table.length > 0 && severitySteps(severity as SecuritySeverity, consequence, reachable) > 1 && !calibrated) {
+      if (precondition !== undefined) {
+        if (table.length > 0 && severitySteps(severity as SecuritySeverity, consequence, reachable, precondition) > 0 && !calibrated) {
+          fail("K10", `question \`${id}\`: \`severity: ${severity}\` is not §5.1's row (\`${consequence}\`, \`precondition: ${precondition}\` → ${table.map((t) => `\`${t}\``).join(" or ")}, \`reachable: ${reachable}\`) and carries no \`calibration\` reason — a block naming its precondition takes the row's severity`, FINDINGS_FILE);
+        }
+      } else if (table.length > 0 && severitySteps(severity as SecuritySeverity, consequence, reachable) > 1 && !calibrated) {
         fail("K10", `question \`${id}\`: \`severity: ${severity}\` is more than one step from §5.1's table (\`${consequence}\`, \`reachable: ${reachable}\` → ${table.map((t) => `\`${t}\``).join(" or ")}) and carries no \`calibration\` reason`, FINDINGS_FILE);
       }
     }
