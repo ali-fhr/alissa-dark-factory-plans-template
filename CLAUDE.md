@@ -8,7 +8,12 @@ per-fleet configuration (default `<owner>/alissa-dark-factory-plans`) — never 
 1. **One directory per plan.** A plan is exactly `plans/<yyyy-mm-dd>-<slug>/` — `plan.md` plus
    `tasks/<id>.md`, 1–8 task files, nothing else — on a branch named `PLAN-<stamp>-<slug>`. The
    directory name is the plan's `id`; the date is the pass's UTC day; the slug matches
-   `[a-z0-9-]{3,48}`. A plan PR's diff touches nothing outside its own new directory.
+   `[a-z0-9-]{3,48}`. A plan PR's diff touches nothing outside its own new directory — save
+   one exception: a Report plan's `PLAN-` PR also adds its run directory's
+   `knowledge-base/security-reports/<yyyy-mm-dd>-<reviewId>/report-data.json` (exactly one, newly
+   added, judged by K19's data-file checks in the same run; README, *Code Security reports*;
+   design `alissa-code-security-reports` §4.1). Any other `knowledge-base/**` path is rule 1's
+   finding.
 2. **Run `plan-lint` before pushing.** `plan-lint plans/<dir>` runs the twelve rules of §5.5
    (1–9 offline; 10–12 read Alissa with `ALISSA_API_TOKEN`); `plan-lint --write plans/<dir>`
    renders the generated *Summary* and *Dependency graph* sections of `plan.md` from the task
@@ -54,7 +59,7 @@ through Studio's verify routes — and never push a finding your own run refuses
 `quote` and, best, an `archive` taken when the page was read. The run's last line,
 `Discovery-Review: none | light — <reasons>`, is the one classification of the finding for review. A merged finding is never
 edited: a newer finding names it in `reverifies`. A knowledge-base PR never carries a plan, and a
-plan PR never touches `knowledge-base/`.
+plan PR never touches `knowledge-base/` — save a Report plan's one `report-data.json` (rule 1).
 
 ## Non-plan changes
 
