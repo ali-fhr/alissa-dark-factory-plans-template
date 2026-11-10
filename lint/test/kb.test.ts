@@ -17,6 +17,7 @@ import { after, before, describe, it } from "node:test";
 import { reportKb } from "../plan-lint.ts";
 import {
   KB_ARCHIVE_HOSTS, KB_DENY_PATTERNS, KB_TOKEN_SHAPE_SOURCES, type KRule, K_RULE_NAMES, discoveryReviewLine, findingsSchema, isDeniedPath, kRulesRan, lintKb, secretShapedLines,
+  PRECONDITION_SEVERITY, SECURITY_CATEGORIES, SECURITY_PRECONDITIONS, SECURITY_PRECONDITION_CONSEQUENCES, type SecurityPrecondition, type SecuritySeverity,
   securityTextRefusals, severitySteps, svgRefusals, tableSeverities, taskOfBranch,
 } from "../rules.ts";
 import { parseFrontmatter, splitFrontmatter } from "../markdown.ts";
@@ -1236,9 +1237,13 @@ describe("findings v1.4 — the doc block and K15–K18 (alissa-documentation-ch
       assert.notEqual(fm.schema, "alissa-findings/v1.4", name);
       assert.ok(validate(fm), `${name}: ${JSON.stringify(validate.errors)}`);
     }
-    // v1.4 reads v1.3's security block and kind as written: a widening, not a fork.
-    const security = yamlOf(readFileSync(join(kbFixture("kb-k14-ok-security-review"), "findings.md"), "utf8")) as Record<string, unknown>;
-    assert.ok(validate({ ...security, schema: "alissa-findings/v1.4" }), JSON.stringify(validate.errors));
+    // v1.4 reads v1.3's security block and kind, once its `security` consequence names the
+    // precondition v1.4 requires on it (Studio issue #4754); the `correctness` block needs none.
+    const security = yamlOf(readFileSync(join(kbFixture("kb-k14-ok-security-review"), "findings.md"), "utf8")) as { questions: Array<{ security: Record<string, unknown> }> };
+    assert.equal(validate({ ...security, schema: "alissa-findings/v1.4" }), false);
+    const [q1, q2] = security.questions;
+    const named = { ...security, schema: "alissa-findings/v1.4", questions: [{ ...q1, security: { ...q1?.security, precondition: "invited" } }, q2] };
+    assert.ok(validate(named), JSON.stringify(validate.errors));
     const plain = yamlOf(readFileSync(join(kbFixture("kb-golden"), "findings.md"), "utf8")) as Record<string, unknown>;
     assert.ok(validate({ ...plain, schema: "alissa-findings/v1.4" }), JSON.stringify(validate.errors));
   });
@@ -1388,6 +1393,170 @@ describe("findings v1.4 — the doc block and K15–K18 (alissa-documentation-ch
     const dir = variantDir(code);
     const run = await runCli(["--kb", dir, "--no-base", "--offline"]);
     assert.match(run.stdout, /^Discovery-Review: light — high impact: q1$/m);
+  });
+});
+
+/**
+ * Studio's §5.1 table, copied verbatim from ali-fhr/studio.alissa.app `convex/core/findings.ts` at
+ * e14e74a87aa3a090a4a6bb16053286aae4ce8db7 (Studio issue #4754): `SEVERITY_TABLE`,
+ * `PRECONDITION_SEVERITY`, `SECURITY_PRECONDITION_CONSEQUENCES` and `tableSeverities`. The template's
+ * `tableSeverities` (lint/rules.ts) must equal it on every consequence × precondition × reachable.
+ */
+const STUDIO_AT = "e14e74a87aa3a090a4a6bb16053286aae4ce8db7";
+const STUDIO_SECURITY_CONSEQUENCES = ["money", "data", "security", "correctness", "leak", "alarm", "stall", "contract", "cosmetic", "redundant-test", "hypothetical"] as const;
+const STUDIO_SECURITY_REACHABLE = ["yes", "no", "unknown"] as const;
+const STUDIO_SECURITY_PRECONDITIONS = ["none", "self_serve", "invited", "privileged"] as const;
+const STUDIO_SECURITY_CATEGORIES = ["authz", "money", "injection", "storage", "secrets", "supply_chain", "container", "abuse"] as const;
+const STUDIO_SECURITY_PRECONDITION_CONSEQUENCES: readonly string[] = ["money", "data", "security"];
+const STUDIO_SEVERITY_TABLE: Readonly<Record<string, readonly SecuritySeverity[]>> = {
+  money: ["critical"], data: ["critical"], security: ["critical", "high"],
+  correctness: ["medium"], leak: ["medium"], alarm: ["medium"], stall: ["medium"], contract: ["medium"],
+  cosmetic: ["low"], "redundant-test": ["low"], hypothetical: ["low"],
+};
+const STUDIO_PRECONDITION_SEVERITY: Readonly<Record<SecurityPrecondition, SecuritySeverity>> = {
+  none: "critical", self_serve: "critical", invited: "high", privileged: "medium",
+};
+function studioTableSeverities(consequence: string, reachable: string, precondition?: SecurityPrecondition): readonly SecuritySeverity[] {
+  if (reachable === "no") return ["low"];
+  if (precondition !== undefined && STUDIO_SECURITY_PRECONDITION_CONSEQUENCES.includes(consequence)) return [STUDIO_PRECONDITION_SEVERITY[precondition]];
+  return STUDIO_SEVERITY_TABLE[consequence] as readonly SecuritySeverity[];
+}
+
+describe("findings v1.4 — `security.precondition` pins K10, and the `abuse` category (alissa-security-review §5.1, Studio issue #4754)", () => {
+  const SEVERITIES: readonly SecuritySeverity[] = ["critical", "high", "medium", "low"];
+  const v13 = () => readFileSync(join(kbFixture("kb-k14-ok-security-review"), "findings.md"), "utf8");
+  /** The v1.3 security fixture as a v1.4 file: q1 (`consequence: security`) names `precondition: invited`, so `severity: high` is its row. */
+  const base = () => v13().replace("schema: alissa-findings/v1.3", "schema: alissa-findings/v1.4").replace("      consequence: security\n", "      consequence: security\n      precondition: invited\n");
+  /** q1's block with these fields replaced (a `null` drops the line). */
+  const q1 = (fields: Record<string, string | null>, text = base()): string => {
+    const [head, tail] = text.split("  - id: q2\n") as [string, string];
+    let out = head;
+    for (const [k, v] of Object.entries(fields)) {
+      const re = new RegExp(`^ {6}${k}: .*\\n`, "m");
+      if (re.test(out)) out = out.replace(re, v === null ? "" : `      ${k}: ${v}\n`);
+      else if (v !== null) out = out.replace("      crossRun: new\n", `      crossRun: new\n      ${k}: ${v}\n`);
+    }
+    return `${out}  - id: q2\n${tail}`;
+  };
+  const variantDir = (text: string): string => {
+    const dir = join(tempDir("kb-v14-pre"), "knowledge-base", "2026", "10", "14", "TASK-1324");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "findings.md"), text);
+    return dir;
+  };
+  const offline = async (text: string) => lintKb(readKbDir(variantDir(text), null), { online: false });
+  const said = (f: Array<{ rule: string; message: string }>) => f.map((x) => `${x.rule} ${x.message}`).join("\n");
+  const rulesOf = (f: Array<{ rule: string }>) => [...new Set(f.map((x) => x.rule))];
+  const CALIBRATION = "Verify found the route sits behind the operator's VPN.";
+
+  it(`the K10 table equals Studio's tableSeverities (${STUDIO_AT.slice(0, 8)}) on every consequence × precondition × reachable`, () => {
+    let n = 0;
+    for (const consequence of STUDIO_SECURITY_CONSEQUENCES) {
+      for (const precondition of [undefined, ...STUDIO_SECURITY_PRECONDITIONS]) {
+        for (const reachable of STUDIO_SECURITY_REACHABLE) {
+          const want = studioTableSeverities(consequence, reachable, precondition);
+          assert.deepEqual(tableSeverities(consequence, reachable, precondition), want, `${consequence} × ${precondition ?? "(none named)"} × ${reachable}`);
+          for (const severity of SEVERITIES) {
+            const steps = Math.min(...want.map((t) => Math.abs(SEVERITIES.indexOf(t) - SEVERITIES.indexOf(severity))));
+            assert.equal(severitySteps(severity, consequence, reachable, precondition), steps, `${severity} on ${consequence} × ${precondition} × ${reachable}`);
+          }
+          n++;
+        }
+      }
+    }
+    assert.equal(n, 11 * 5 * 3);
+    assert.deepEqual(PRECONDITION_SEVERITY, STUDIO_PRECONDITION_SEVERITY);
+    assert.deepEqual([...SECURITY_PRECONDITIONS], [...STUDIO_SECURITY_PRECONDITIONS]);
+    assert.deepEqual([...SECURITY_PRECONDITION_CONSEQUENCES], [...STUDIO_SECURITY_PRECONDITION_CONSEQUENCES]);
+    assert.deepEqual([...SECURITY_CATEGORIES], [...STUDIO_SECURITY_CATEGORIES]);
+    // The schema's lists are the same lists.
+    const schema = JSON.parse(readFileSync(new URL("../../schema/findings.v1.json", import.meta.url), "utf8")) as { definitions: { security: { properties: Record<string, { enum: string[] }> } } };
+    assert.deepEqual(schema.definitions.security.properties.precondition?.enum, [...STUDIO_SECURITY_PRECONDITIONS]);
+    assert.deepEqual(schema.definitions.security.properties.category?.enum, [...STUDIO_SECURITY_CATEGORIES]);
+    assert.deepEqual(schema.definitions.security.properties.consequence?.enum, [...STUDIO_SECURITY_CONSEQUENCES]);
+  });
+
+  it("the v1.4 fixture passes as written: a named precondition at its row's severity", async () => {
+    const r = await offline(base());
+    assert.deepEqual(r.failures, [], said(r.failures));
+  });
+
+  it("K10: security × precondition none — high with no calibration fails, naming the row; critical passes; a calibration admits high", async () => {
+    const high = (await offline(q1({ precondition: "none", severity: "high" }))).failures;
+    assert.deepEqual(rulesOf(high), ["K10"], said(high));
+    assert.match(said(high), /^K10 question `q1`: `severity: high` is not §5\.1's row \(`security`, `precondition: none` → `critical`, `reachable: yes`\) and carries no `calibration` reason — a block naming its precondition takes the row's severity$/m);
+    assert.deepEqual((await offline(q1({ precondition: "none", severity: "critical" }))).failures, []);
+    assert.deepEqual((await offline(q1({ precondition: "none", severity: "high", calibration: CALIBRATION }))).failures, []);
+    // A whitespace-only calibration is no reason.
+    assert.deepEqual(rulesOf((await offline(q1({ precondition: "none", severity: "high", calibration: '" "' }))).failures), ["K10"]);
+  });
+
+  it("K10: privileged × medium passes; privileged × high, one step off, fails — a named precondition admits no step", async () => {
+    assert.deepEqual((await offline(q1({ precondition: "privileged", severity: "medium" }))).failures, []);
+    const off = (await offline(q1({ precondition: "privileged", severity: "high" }))).failures;
+    assert.deepEqual(rulesOf(off), ["K10"], said(off));
+    assert.match(said(off), /`severity: high` is not §5\.1's row \(`security`, `precondition: privileged` → `medium`, `reachable: yes`\)/);
+  });
+
+  it("K10: every row — money, data and security behind each precondition, reachable yes, unknown and no — takes its severity exactly", async () => {
+    for (const consequence of ["money", "data", "security"]) {
+      for (const precondition of STUDIO_SECURITY_PRECONDITIONS) {
+        for (const reachable of STUDIO_SECURITY_REACHABLE) {
+          const row = reachable === "no" ? "low" : STUDIO_PRECONDITION_SEVERITY[precondition];
+          for (const severity of SEVERITIES) {
+            const where = `${consequence} × ${precondition} × ${reachable} at ${severity}`;
+            const f = (await offline(q1({ consequence, precondition, reachable, severity }))).failures;
+            if (severity === row) assert.deepEqual(f, [], `${where}: ${said(f)}`);
+            else {
+              assert.deepEqual(rulesOf(f), ["K10"], `${where}: ${said(f)}`);
+              assert.ok(said(f).includes(`(\`${consequence}\`, \`precondition: ${precondition}\` → \`${row}\`, \`reachable: ${reachable}\`)`), `${where}: ${said(f)}`);
+            }
+          }
+        }
+      }
+    }
+  });
+
+  it("K10: a precondition on a consequence where it is optional pins that consequence's own row; without one the one-step rule holds", async () => {
+    // correctness → medium. With a precondition named, high is off the row; without one, one step passes and two fail.
+    const named = (await offline(q1({ consequence: "correctness", precondition: "none", severity: "high" }))).failures;
+    assert.match(said(named), /`severity: high` is not §5\.1's row \(`correctness`, `precondition: none` → `medium`, `reachable: yes`\)/);
+    assert.deepEqual((await offline(q1({ consequence: "correctness", precondition: "none", severity: "medium" }))).failures, []);
+    assert.deepEqual((await offline(q1({ consequence: "correctness", precondition: null, severity: "high" }))).failures, []);
+    const far = (await offline(q1({ consequence: "correctness", precondition: null, severity: "critical" }))).failures;
+    assert.match(said(far), /`severity: critical` is more than one step from §5\.1's table \(`correctness`, `reachable: yes` → `medium`\) and carries no `calibration` reason/);
+  });
+
+  it("the schema: a v1.4 money, data or security block missing its precondition is refused (K10, Studio's wording); an off-list value is K10", async () => {
+    for (const consequence of ["money", "data", "security"]) {
+      const f = (await offline(q1({ consequence, precondition: null, severity: "critical" }))).failures;
+      assert.deepEqual(rulesOf(f), ["K10"], `${consequence}: ${said(f)}`);
+      assert.match(said(f), new RegExp(`^K10 question \`q1\`: a \`${consequence}\` consequence names its \`security\\.precondition\` \\(none \\| self_serve \\| invited \\| privileged\\) — who can reach the effect picks §5\\.1's row$`, "m"));
+    }
+    const validate = findingsSchema();
+    assert.equal(validate(yamlOf(q1({ consequence: "data", precondition: null, severity: "critical" }))), false);
+    const bad = (await offline(q1({ precondition: "anonymous" }))).failures;
+    assert.deepEqual(rulesOf(bad), ["K10"], said(bad));
+    assert.match(said(bad), /\/security\/precondition must be equal to one of the allowed values: none, self_serve, invited, privileged/);
+  });
+
+  it("`abuse` is a v1.4 category: refused in a v1.3 file (K10), read in a v1.4 one", async () => {
+    const f = (await offline(v13().replace("category: authz", "category: abuse"))).failures;
+    assert.deepEqual(rulesOf(f), ["K10"], said(f));
+    assert.match(said(f), /^K10 question `q1`: `security\.category` is one of authz \| money \| injection \| storage \| secrets \| supply_chain \| container \(§3\.2\) — `abuse` needs `schema: alissa-findings\/v1\.4` \(§5\.1\)$/m);
+    assert.equal(findingsSchema()(yamlOf(v13().replace("category: authz", "category: abuse"))), false);
+    assert.deepEqual((await offline(q1({ category: "abuse" }))).failures, []);
+  });
+
+  it("a v1.3 file is unchanged: no precondition (refused if named), and the more-than-one-step rule", async () => {
+    assert.deepEqual((await offline(v13())).failures, []);
+    // security, reachable: critical or high on the table; medium is one step from high — passes.
+    assert.deepEqual((await offline(v13().replace("severity: high", "severity: medium"))).failures, []);
+    const low = (await offline(v13().replace("severity: high", "severity: low"))).failures;
+    assert.match(said(low), /^K10 question `q1`: `severity: low` is more than one step from §5\.1's table \(`security`, `reachable: yes` → `critical` or `high`\) and carries no `calibration` reason$/m);
+    const named = (await offline(q1({ precondition: "none" }, v13()))).failures;
+    assert.deepEqual(rulesOf(named), ["K10"], said(named));
+    assert.match(said(named), /^K10 question `q1`: unknown `security` key `precondition` — it is alissa-findings\/v1\.4's \(§5\.1\)$/m);
   });
 });
 

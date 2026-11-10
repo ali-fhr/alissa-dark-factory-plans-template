@@ -13,7 +13,7 @@
 // report; --check-output <path> writes { conclusion, title, summary } for a check run.
 // A pull request that changes any knowledge-base/** file is linted in the knowledge-base mode, K1–K23
 // (design alissa-build-discovery §3.4; K10–K14, a question's `security` block, alissa-security-review
-// §5.2; K15–K18, a question's `doc` block, alissa-documentation-check §5.2): K1–K5, K9–K16 and K18
+// §5.2, its v1.4 `precondition` pinning K10's row; K15–K18, a question's `doc` block, alissa-documentation-check §5.2): K1–K5, K9–K16 and K18
 // offline, K6 reads the task, K7 posts the repo cites and K17 the quoted doc passages to Studio's
 // verify route, and K8 the URL cites to its url-cites route; --kb runs the same rules over a local
 // directory. A finding's report ends with its `Discovery-Review: none | light — <reasons>` line, where a
