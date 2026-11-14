@@ -1606,8 +1606,11 @@ describe("findings v1.4 — `security.precondition` pins K10, and the `abuse` ca
     const low = (await offline(v13().replace("severity: high", "severity: low"))).failures;
     assert.match(said(low), /^K10 question `q1`: `severity: low` is more than one step from §5\.1's table \(`security`, `reachable: yes` → `critical` or `high`\) and carries no `calibration` reason$/m);
     const named = (await offline(q1({ precondition: "none" }, v13()))).failures;
+    // Only the unknown-key message: the v1.4 row is not applied to a v1.3 file (`high` is fine under v1.3).
+    assert.equal(named.length, 1, said(named));
     assert.deepEqual(rulesOf(named), ["K10"], said(named));
     assert.match(said(named), /^K10 question `q1`: unknown `security` key `precondition` — it is alissa-findings\/v1\.4's \(§5\.1\)$/m);
+    assert.doesNotMatch(said(named), /is not §5\.1's row/);
   });
 });
 
