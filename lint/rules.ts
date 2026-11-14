@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { isIP } from "node:net";
 import AjvModule, { type ErrorObject, type ValidateFunction } from "ajv";
 import { minimatch } from "minimatch";
-import { type AlissaPoster, type AlissaReader, AlissaUnavailable, describe, isTransient } from "./alissa.ts";
+import { type AlissaPoster, type Answer, type AlissaReader, AlissaUnavailable, describe, isTransient } from "./alissa.ts";
 import { contentsPath, repoPath } from "./github.ts";
 import { charLength, level2Sections, listItems, parseFrontmatter, splitFrontmatter } from "./markdown.ts";
 import {
@@ -1270,6 +1270,21 @@ const VERIFY_REASONS: Readonly<Record<string, string>> = {
   lines_out_of_range: "has a line range that runs past the file's end",
 };
 
+/** K1's design-task check reads at most this many of the PR task's direct upstreams (one hop, no transitive walk). */
+export const DESIGN_UPSTREAM_READS = 3;
+
+interface TaskKindAndEdges { kind?: unknown; dependsOn?: unknown; hardDependsOn?: unknown }
+
+/** A task body's direct upstream ids, `dependsOn` then `hardDependsOn`, de-duplicated, non-strings dropped. */
+function directUpstreams(task: TaskKindAndEdges | undefined): string[] {
+  const ids: string[] = [];
+  for (const list of [task?.dependsOn, task?.hardDependsOn]) {
+    if (!Array.isArray(list)) continue;
+    for (const id of list) if (typeof id === "string" && id !== "" && !ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
 /** `TASK-<n>` from a `TASK-<n>-<DESC>` branch name, or `null`. */
 export function taskOfBranch(branch: string | undefined): string | null {
   const m = /^TASK-([1-9][0-9]*)-/.exec(branch ?? "");
@@ -1304,11 +1319,28 @@ export async function lintKb(src: KbSource, opts: KbLintOptions): Promise<KbLint
     else {
       try {
         const res = await opts.reader.get(`/v1/tasks/${encodeURIComponent(task)}`);
-        if (res.status !== 200) fail("K1", `could not read the PR's task \`${task}\`: ${describe(res)}`);
-        else {
-          const kind = (res.body as { task?: { kind?: unknown } })?.task?.kind ?? "code";
-          if (kind !== "design") fail("K1", `the PR's task \`${task}\` is \`kind: ${clean(kind)}\` — only a design task ${adds}`);
+        if (res.status !== 200) return fail("K1", `could not read the PR's task \`${task}\`: ${describe(res)}`);
+        const body = (res.body as { task?: TaskKindAndEdges } | null)?.task;
+        const kind = body?.kind ?? "code";
+        if (kind === "design") return;
+        // The developer seat's implementation task sits DOWNSTREAM of the design task it implements:
+        // one hop over its direct upstreams, at most DESIGN_UPSTREAM_READS reads, `kind` the only property read.
+        for (const up of directUpstreams(body).slice(0, DESIGN_UPSTREAM_READS)) {
+          let upRes: Answer;
+          try {
+            upRes = await opts.reader.get(`/v1/tasks/${encodeURIComponent(up)}`);
+          } catch (err) {
+            if (err instanceof AlissaUnavailable) return fail("K1", `could not read \`${clean(up)}\`, a task the PR's task \`${task}\` depends on: ${err.message}`);
+            throw err;
+          }
+          if (upRes.status !== 200) return fail("K1", `could not read \`${clean(up)}\`, a task the PR's task \`${task}\` depends on: ${describe(upRes)}`);
+          const upKind = (upRes.body as { task?: { kind?: unknown } } | null)?.task?.kind ?? "code";
+          if (upKind === "design") {
+            notes.push(`K1: the PR's task \`${task}\` is the implementation task downstream of design task \`${clean(up)}\``);
+            return;
+          }
         }
+        fail("K1", `the PR's task \`${task}\` is \`kind: ${clean(kind)}\` — only a design task ${adds} (nor is any task it depends on)`);
       } catch (err) {
         if (err instanceof AlissaUnavailable) fail("K1", `could not verify the PR's task \`${task}\`: ${err.message}`);
         else throw err;
