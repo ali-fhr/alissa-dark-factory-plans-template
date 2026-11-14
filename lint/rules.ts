@@ -1664,7 +1664,9 @@ function kbSecurity(fm: Record<string, unknown>, questions: Array<Record<string,
     // is optional) may stand one step off, and further needs the reason.
     const severity = s.severity, consequence = s.consequence, reachable = s.reachable;
     if (typeof severity === "string" && (SECURITY_SEVERITIES as readonly string[]).includes(severity) && typeof consequence === "string" && typeof reachable === "string") {
-      const precondition = isPrecondition(s.precondition) ? s.precondition : undefined;
+      // Only a v1.4 file may name a precondition: in a v1.3 file the key is already refused by the
+      // schema (unknown `security` key), and the block keeps the one-step rule, as Studio's parser does.
+      const precondition = fm.schema === FINDINGS_SCHEMA_V14 && isPrecondition(s.precondition) ? s.precondition : undefined;
       const table = tableSeverities(consequence, reachable, precondition);
       const calibrated = typeof s.calibration === "string" && s.calibration.trim() !== "";
       if (precondition !== undefined) {
