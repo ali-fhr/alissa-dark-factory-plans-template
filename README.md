@@ -509,7 +509,7 @@ never *nothing to lint* — under the K rules, numbered apart from §5.5's:
 
 | Rule | Name | Refuses | Reads |
 |---|---|---|---|
-| K1 | layout and immutability | a diff outside **one** new `knowledge-base/<YYYY>/<MM>/<DD>/TASK-<n>/` directory (a mix with `plans/**` included); a directory already on the base branch; anything in it but `findings.md` and a flat `evidence/` folder; a nested `evidence/` path, a symlink, an evidence file misnamed, of a type not admitted, an image whose bytes are not its type, text evidence that is not UTF-8, or an svg that is not inert; a date that is not a real calendar day; a change that is not an add. **The one exception:** exactly one new `knowledge-base/assessments/<project-slug>-<yyyy-mm-dd>.md` file and nothing else, from a `kind: design` task (milestone 0's assessment, §7.1) — the pull request's task is its `TASK-<n>-…` branch (`GITHUB_HEAD_REF`) or `--task`. **The second:** files added to one `knowledge-base/security-reports/<yyyy-mm-dd>-<reviewId>/` run directory, flat and regular, from a `kind: design` task the same way; a file already on the base branch is never edited (below) | git; Alissa for the assessment's or the report's task |
+| K1 | layout and immutability | a diff outside **one** new `knowledge-base/<YYYY>/<MM>/<DD>/TASK-<n>/` directory (a mix with `plans/**` included); a directory already on the base branch; anything in it but `findings.md` and a flat `evidence/` folder; a nested `evidence/` path, a symlink, an evidence file misnamed, of a type not admitted, an image whose bytes are not its type, text evidence that is not UTF-8, or an svg that is not inert; a date that is not a real calendar day; a change that is not an add. **The one exception:** exactly one new `knowledge-base/assessments/<project-slug>-<yyyy-mm-dd>.md` file and nothing else, from a `kind: design` task or a task directly downstream of one (milestone 0's assessment, §7.1) — the pull request's task is its `TASK-<n>-…` branch (`GITHUB_HEAD_REF`) or `--task`; a task that is not `kind: design` passes when one of its direct upstreams is — one hop, `dependsOn` then `hardDependsOn`, at most 3 upstreams read, and an upstream that cannot be read fails K1. **The second:** files added to one `knowledge-base/security-reports/<yyyy-mm-dd>-<reviewId>/` run directory, flat and regular, from a `kind: design` task, or a task directly downstream of one, the same way; a file already on the base branch is never edited (below) | git; Alissa for the assessment's or the report's task |
 | K2 | frontmatter | frontmatter that does not split, parse or validate against `schema/findings.v1.json`; a `task` that is not the directory's; a repeated question id or `reads` repository; a cite of a repository not in `reads` | — |
 | K3 | completeness | an `answered` or `partial` question with no `answer`; an `unanswerable` one with no `reason`; an `answered` one with no cite; a body with no `## Summary` | — |
 | K4 | size | `findings.md` over 32 KB; more than 12 questions, 12 risks, 8 suggested tasks or 24 cites per entry; a cite spanning more than 400 lines; a `## Summary` over 1,200 characters or a question's section over 6,000; an evidence file over 2 MB, a folder over 10 MB or 20 files | — |
@@ -570,8 +570,12 @@ review's creation day (UTC):
   findings" with one critical in the data file fails K20, and calling a Not re-verified finding
   confirmed fails K22. The summary is the shareable document, so it never carries a code fence, a
   cite or a scenario (K23).
-- **K1** admits the run directory's files from a `kind: design` task only, read online as for an
-  assessment. A pull request adds files to the one run directory and nothing else, and a file already
+- **K1** admits the run directory's files from a `kind: design` task, or from a task directly
+  downstream of one, read online as for an assessment. The implementation task the developer seat
+  works sits downstream of the design task it implements, so K1 reads the PR task's direct
+  upstreams in order — one hop, `dependsOn` then `hardDependsOn`, at most 3 — and stops at the
+  first that is `kind: design`, which passes, or that cannot be read, which fails K1 and never
+  passes it silently. A pull request adds files to the one run directory and nothing else, and a file already
   merged is never edited, since the record is immutable. An edited `report-data.json` is K19's
   finding. The rules judge the run directory as it will stand, so a technical task's PR is linted with
   the data file and the technical files already merged. The summary task's PR, which comes last, is
