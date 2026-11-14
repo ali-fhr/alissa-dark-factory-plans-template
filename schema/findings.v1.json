@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/ali-fhr/alissa-plans/schema/findings.v1.json",
   "title": "alissa-plans findings frontmatter, version 1.4 (knowledge-base/<YYYY>/<MM>/<DD>/TASK-<n>/findings.md)",
-  "description": "Widened in place from v1 (design alissa-build-discovery §2.3, §2.5, §4.6), so every alissa-findings/v1 file validates as written. v1.1 adds the URL cite beside the repo cite, bodyOfWork as the alternative to project (exactly one of the two), asker, and reads that may be empty. v1.2 (operator decision 2026-10-20) adds the evidence cite, naming a file of the finding's own evidence/ folder; a v1 or v1.1 file carries none. v1.3 (design alissa-security-review §5.1, lane SR-2) adds the optional `security` block on a question and the file-level `kind: security_review` that K14 requires beside it; a v1, v1.1 or v1.2 file carries neither. v1.4 (design alissa-documentation-check §5.1, lane DOC-3) adds the optional `doc` block on a question — a documentation passage's verdict against the code — and `kind: doc_check`, which K18 requires beside it; a question carries `security` or `doc`, never both (K15), and a file before v1.4 carries neither.",
+  "description": "Widened in place from v1 (design alissa-build-discovery §2.3, §2.5, §4.6), so every alissa-findings/v1 file validates as written. v1.1 adds the URL cite beside the repo cite, bodyOfWork as the alternative to project (exactly one of the two), asker, and reads that may be empty. v1.2 (operator decision 2026-10-20) adds the evidence cite, naming a file of the finding's own evidence/ folder; a v1 or v1.1 file carries none. v1.3 (design alissa-security-review §5.1, lane SR-2) adds the optional `security` block on a question and the file-level `kind: security_review` that K14 requires beside it; a v1, v1.1 or v1.2 file carries neither. v1.4 (design alissa-documentation-check §5.1, lane DOC-3) adds the optional `doc` block on a question — a documentation passage's verdict against the code — and `kind: doc_check`, which K18 requires beside it; a question carries `security` or `doc`, never both (K15), and a file before v1.4 carries neither. The same v1.4 (design alissa-security-review §5.1, Studio issue #4754) widens the `security` block: `category` gains `abuse`, and `precondition` (none | self_serve | invited | privileged) names who can reach the effect — required on a `money`, `data` or `security` consequence, where it pins K10's row; a v1.3 file carries neither.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "task", "reads", "topics", "questions"],
@@ -124,6 +124,33 @@
       }
     },
     {
+      "if": { "properties": { "schema": { "const": "alissa-findings/v1.3" } } },
+      "then": {
+        "description": "An alissa-findings/v1.3 `security` block carries no `precondition` and no `category: abuse`: those are v1.4's (Studio issue #4754).",
+        "properties": {
+          "questions": { "items": { "properties": { "security": { "properties": { "precondition": false, "category": { "not": { "const": "abuse" } } } } } } }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "schema": { "const": "alissa-findings/v1.4" } } },
+      "then": {
+        "description": "An alissa-findings/v1.4 `security` block with a `money`, `data` or `security` consequence names its `precondition`: who can reach the effect picks §5.1's row (K10).",
+        "properties": {
+          "questions": {
+            "items": {
+              "properties": {
+                "security": {
+                  "if": { "properties": { "consequence": { "enum": ["money", "data", "security"] } }, "required": ["consequence"] },
+                  "then": { "properties": { "precondition": true }, "required": ["precondition"] }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
       "if": { "properties": { "schema": { "const": "alissa-findings/v1.1" } } },
       "then": {
         "description": "An alissa-findings/v1.1 file carries no evidence cite: that is v1.2's.",
@@ -156,14 +183,14 @@
     "level": { "type": "string", "enum": ["high", "medium", "low"] },
     "oneLine": { "type": "string", "minLength": 1, "pattern": "^[^\\r\\n\\u2028\\u2029]+$" },
     "security": {
-      "description": "v1.3 (design alissa-security-review §5.1): one security finding. `severity` is calibrated as consequence × reachability (§5.1's table, K10); `calibration` is the stated reason when it departs from the table by more than one step. `key` is stable across runs (§4.2) and unique in the file (K11).",
+      "description": "v1.3 (design alissa-security-review §5.1): one security finding. `severity` is calibrated as consequence × reachability (§5.1's table, K10); `calibration` is the stated reason when it departs from the table by more than one step. v1.4 adds `precondition` (who can reach the effect: none, self_serve, invited, privileged) and the `abuse` category; a block naming its precondition takes its row's severity exactly or carries a `calibration` (K10). `key` is stable across runs (§4.2) and unique in the file (K11).",
       "type": "object",
       "additionalProperties": false,
       "required": ["key", "severity", "category", "consequence", "reachable", "scenario", "fix", "crossRun"],
       "properties": {
         "key": { "type": "string", "pattern": "^[a-z0-9.-]{1,80}$" },
         "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] },
-        "category": { "type": "string", "enum": ["authz", "money", "injection", "storage", "secrets", "supply_chain", "container"] },
+        "category": { "type": "string", "enum": ["authz", "money", "injection", "storage", "secrets", "supply_chain", "container", "abuse"] },
         "consequence": {
           "type": "string",
           "enum": ["money", "data", "security", "correctness", "leak", "alarm", "stall", "contract", "cosmetic", "redundant-test", "hypothetical"]
@@ -173,7 +200,8 @@
         "fix": { "type": "string", "minLength": 1, "maxLength": 800 },
         "crossRun": { "type": "string", "enum": ["new", "still_open", "fixed", "regressed"] },
         "cwe": { "type": "string", "pattern": "^CWE-[1-9][0-9]{0,5}$" },
-        "calibration": { "$ref": "#/definitions/oneLine", "maxLength": 300 }
+        "calibration": { "$ref": "#/definitions/oneLine", "maxLength": 300 },
+        "precondition": { "type": "string", "enum": ["none", "self_serve", "invited", "privileged"] }
       }
     },
     "doc": {
