@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { reportKb } from "../plan-lint.ts";
 import {
-  KB_ARCHIVE_HOSTS, KB_DENY_PATTERNS, KB_TOKEN_SHAPE_SOURCES, type KRule, K_RULE_NAMES, discoveryReviewLine, findingsSchema, isDeniedPath, kRulesRan, lintKb, secretShapedLines,
+  KB_ARCHIVE_HOSTS, KB_DENY_PATTERNS, KB_TOKEN_SHAPE_SOURCES, type KbLintResult, type KRule, K_RULE_NAMES, discoveryReviewLine, findingsSchema, isDeniedPath, kRulesRan, lintKb, secretShapedLines,
   PRECONDITION_SEVERITY, SECURITY_CATEGORIES, SECURITY_PRECONDITIONS, SECURITY_PRECONDITION_CONSEQUENCES, type SecurityPrecondition, type SecuritySeverity,
   securityTextRefusals, severitySteps, svgRefusals, tableSeverities, taskOfBranch,
 } from "../rules.ts";
@@ -296,6 +296,57 @@ describe("milestone 0's assessment (review fix a)", () => {
     const run = await runCli(prArgs(assessmentPr()), { ...cliEnv(api), GITHUB_HEAD_REF: "TASK-2001-assessment" });
     assert.equal(run.status, 1);
     assert.match(run.stdout, /FAIL K1 .*`TASK-2001` is `kind: code` — only a design task adds a `knowledge-base\/assessments\/\*\.md` file/);
+  });
+
+  describe("one hop upstream: the developer seat's implementation task (CSR-13)", () => {
+    const lint = (task: string) => lintCase("kb-assessment", task);
+    const reads = async (task: string): Promise<{ r: KbLintResult; got: string[] }> => {
+      const before = api.requests.length;
+      const r = await lint(task);
+      return { r, got: api.requests.slice(before).filter((q) => q.startsWith("GET /v1/tasks/")).map((q) => q.slice("GET /v1/tasks/".length)) };
+    };
+    const k1 = (r: KbLintResult): string => r.failures.filter((f) => f.rule === "K1").map((f) => f.message).join("\n");
+
+    it("a design task passes, reading nothing upstream", async () => {
+      const { r, got } = await reads("TASK-2000");
+      assert.equal(k1(r), "");
+      assert.deepEqual(got, ["TASK-2000"]);
+      assert.ok(!r.notes.some((n) => /implementation task downstream/.test(n)));
+    });
+
+    it("a code task with a direct kind: design upstream passes, with the note", async () => {
+      const { r, got } = await reads("TASK-2002");
+      assert.equal(k1(r), "");
+      assert.deepEqual(got, ["TASK-2002", "TASK-2000"]);
+      assert.ok(r.notes.includes("K1: the PR's task `TASK-2002` is the implementation task downstream of design task `TASK-2000`"), r.notes.join("\n"));
+    });
+
+    it("a code task whose upstreams (dependsOn and hardDependsOn) are all code fails, with the new message", async () => {
+      const { r, got } = await reads("TASK-2003");
+      assert.deepEqual(got, ["TASK-2003", "TASK-2001", "TASK-1200"]);
+      assert.match(k1(r), /^the PR's task `TASK-2003` is `kind: code` — only a design task adds a `knowledge-base\/assessments\/\*\.md` file \(§7\.1\) \(nor is any task it depends on\)$/);
+    });
+
+    it("a code task with no upstreams fails", async () => {
+      const { r, got } = await reads("TASK-2001");
+      assert.deepEqual(got, ["TASK-2001"]);
+      assert.match(k1(r), /`TASK-2001` is `kind: code` — only a design task .*\(nor is any task it depends on\)$/);
+    });
+
+    it("an upstream that answers 404 or 5xx fails it, 'could not read' — never a silent pass", async () => {
+      const missing = (await reads("TASK-2004")).r;
+      assert.match(k1(missing), /^could not read `TASK-2099`, a task the PR's task `TASK-2004` depends on: .*404/);
+      // TASK-2098 is a design task, but its read answers 503: the check still fails.
+      const down = (await reads("TASK-2005")).r;
+      assert.match(k1(down), /^could not read `TASK-2098`, a task the PR's task `TASK-2005` depends on: .*503/);
+      assert.ok(!down.notes.some((n) => /implementation task downstream/.test(n)));
+    });
+
+    it("reads at most 3 upstreams: a design task fourth in line is never read", async () => {
+      const { r, got } = await reads("TASK-2006");
+      assert.deepEqual(got, ["TASK-2006", "TASK-2001", "TASK-1200", "TASK-2007"]);
+      assert.match(k1(r), /\(nor is any task it depends on\)$/);
+    });
   });
 
   it("with no task to check, K1 refuses it online", async () => {

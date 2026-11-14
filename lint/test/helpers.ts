@@ -42,7 +42,13 @@ export interface KbWorld {
    * `TASK-<n>` → what `GET /v1/tasks/:id?view=full` answers; `reads` becomes the Alissa-Reads trailer
    * (`none` included), `sources` the Alissa-Sources trailer and `asker` the Alissa-Asker trailer.
    */
-  tasks: Record<string, { kind: string; createdAt: number; reads?: string; sources?: string; asker?: string; ownerId?: string }>;
+  tasks: Record<string, {
+    kind: string; createdAt: number; reads?: string; sources?: string; asker?: string; ownerId?: string;
+    /** The task's direct upstreams, as `GET /v1/tasks/:id` carries them (K1's design-task check reads them). */
+    dependsOn?: string[]; hardDependsOn?: string[];
+    /** Answer this HTTP status (with an error body) instead of the task. */
+    answers?: number;
+  }>;
   /** `<repo>@<sha>:<path>` → the blob and line count Studio's verify route reads there. */
   files: Record<string, { blob: string; lines: number }>;
   /** `<repo>@<sha>:<path>` → a doc file's text, which K17's passages are read against (v1.4, lane DOC-3). */
@@ -64,6 +70,15 @@ export function kbWorld(): KbWorld {
   tasks["TASK-1306"] = { ...discovery, kind: "code" };
   tasks["TASK-2000"] = { kind: "design", createdAt: KB_CREATED };
   tasks["TASK-2001"] = { kind: "code", createdAt: KB_CREATED };
+  // K1's design-task check, one hop upstream (CSR-13): the developer seat's implementation task is
+  // `kind: code`, downstream of the design task it implements.
+  tasks["TASK-2002"] = { kind: "code", createdAt: KB_CREATED, dependsOn: ["TASK-2000"] };
+  tasks["TASK-2003"] = { kind: "code", createdAt: KB_CREATED, dependsOn: ["TASK-2001"], hardDependsOn: ["TASK-1200"] };
+  tasks["TASK-2004"] = { kind: "code", createdAt: KB_CREATED, dependsOn: ["TASK-2099"] };
+  tasks["TASK-2005"] = { kind: "code", createdAt: KB_CREATED, dependsOn: ["TASK-2098"] };
+  tasks["TASK-2098"] = { kind: "design", createdAt: KB_CREATED, answers: 503 };
+  tasks["TASK-2006"] = { kind: "code", createdAt: KB_CREATED, dependsOn: ["TASK-2001", "TASK-1200"], hardDependsOn: ["TASK-2007", "TASK-2000"] };
+  tasks["TASK-2007"] = { kind: "code", createdAt: KB_CREATED };
   // v1.1: the web golden is an ask from TASK-1200 that reads code and pages; each K8 case reads pages only.
   tasks["TASK-1200"] = { kind: "code", createdAt: KB_CREATED };
   tasks["TASK-1240"] = { ...discovery, sources: "both", asker: "TASK-1200" };
@@ -256,10 +271,12 @@ export async function fakeAlissa(world: World = loadWorld(), kb: KbWorld = kbWor
     const seg = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
     if (seg[0] === "v1" && seg[1] === "tasks" && seg.length === 3 && kb.tasks[seg[2] as string]) {
       const k = kb.tasks[seg[2] as string] as KbWorld["tasks"][string];
+      if (k.answers !== undefined) return send(k.answers, { error: "Unavailable", message: `the fixture answers ${k.answers}` });
       const full = url.searchParams.get("view") === "full";
       const trailers = [`Alissa-Kind: ${k.kind}`, ...(k.reads ? [`Alissa-Reads: ${k.reads}`] : []), ...(k.sources ? [`Alissa-Sources: ${k.sources}`] : []), ...(k.asker ? [`Alissa-Asker: ${k.asker}`] : [])];
       const description = `A discovery task of the fixtures.\n\n${trailers.join("\n")}\nAutonomous-Dev: example-org/plans`;
-      const task = { taskNumber: Number((seg[2] as string).slice(5)), status: "in_progress", kind: k.kind, createdAt: k.createdAt, ownerId: k.ownerId ?? KB_OWNER };
+      const task = { taskNumber: Number((seg[2] as string).slice(5)), status: "in_progress", kind: k.kind, createdAt: k.createdAt, ownerId: k.ownerId ?? KB_OWNER,
+        ...(k.dependsOn ? { dependsOn: k.dependsOn } : {}), ...(k.hardDependsOn ? { hardDependsOn: k.hardDependsOn } : {}) };
       return send(200, { task: { ...task, ...(full ? { description } : {}) } });
     }
     if (seg[0] !== "v1") return send(404, { error: "Not Found", message: "The requested endpoint does not exist." });
